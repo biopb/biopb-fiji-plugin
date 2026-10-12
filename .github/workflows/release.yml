@@ -1,0 +1,74 @@
+# Release on a v* tag: build the jar with the tag's version, attach it to a
+# GitHub Release, and (when configured) upload to a Fiji update site.
+#
+# Update-site upload needs, in the repo settings:
+#   secret   IMAGEJ_PW      the wiki password of the update site's uploader
+#   variable UPDATE_SITE    the site's name (registered at imagej.net)
+#   variable WIKI_USER      the wiki user that owns the site
+# Without them the job still publishes the GitHub Release.
+# See https://imagej.net/update-sites/automatic-uploads
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)release, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  IJ_DOWNLOAD_URL: https://downloads.imagej.net/fiji/latest/fiji-latest-linux64-jdk.zip
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      UPDATE_SITE: ${{ vars.UPDATE_SITE }}
+      WIKI_USER: ${{ vars.WIKI_USER }}
+      UPDATE_PASS: ${{ secrets.IMAGEJ_PW }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+          cache: maven
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+      - name: Set the version from the tag
+        run: mvn -B -q versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+      - name: Build and test
+        run: xvfb-run -a mvn -B verify
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jar="target/biopb-fiji-plugin-${TAG#v}.jar"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$jar" --clobber
+          else
+            flags=""
+            case "$TAG" in *rc*|*beta*|*alpha*) flags="--prerelease";; esac
+            gh release create "$TAG" "$jar" --title "$TAG" --generate-notes $flags
+          fi
+      - name: Upload to the Fiji update site
+        if: env.UPDATE_SITE != '' && env.UPDATE_PASS != ''
+        run: |
+          curl -fsSL -o fiji.zip "$IJ_DOWNLOAD_URL"
+          unzip -q fiji.zip
+          fiji=./Fiji.app/fiji-linux-x64
+          $fiji --headless --update update
+          $fiji --headless --update edit-update-site "$UPDATE_SITE" \
+            "https://sites.imagej.net/$UPDATE_SITE/" "webdav:$WIKI_USER:$UPDATE_PASS" .
+          # Copies the plugin and the dependencies Fiji lacks into the install.
+          mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+          $fiji --headless --update upload-complete-site --force "$UPDATE_SITE"
