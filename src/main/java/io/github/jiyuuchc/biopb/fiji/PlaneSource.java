@@ -12,13 +12,20 @@ public interface PlaneSource {
     /** The pixel format of the arrays returned by {@link #readPlane}. */
     enum Kind {
         /** {@code byte[]}, unsigned 8-bit. */
-        GRAY8,
+        GRAY8(1),
         /** {@code short[]}, unsigned 16-bit. */
-        GRAY16,
+        GRAY16(2),
         /** {@code float[]}, 32-bit float (other numeric types are converted to this). */
-        GRAY32,
+        GRAY32(4),
         /** {@code int[]}, packed 0xRRGGBB. */
-        RGB
+        RGB(4);
+
+        private final int bytes;
+
+        Kind(int bytes) { this.bytes = bytes; }
+
+        /** Bytes per pixel of the array returned by {@link #readPlane} (RGB is a 4-byte int). */
+        public int bytesPerPixel() { return bytes; }
     }
 
     /** Plane width in pixels (x). */

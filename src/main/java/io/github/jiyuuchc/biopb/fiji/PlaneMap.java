@@ -3,7 +3,6 @@ package io.github.jiyuuchc.biopb.fiji;
 import ij.ImagePlus;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -31,30 +30,39 @@ public final class PlaneMap {
     }
 
     /**
-     * Derive the mapping from the tensor's {@code dim_labels}: labels {@code t}/{@code time},
-     * {@code c}/{@code ch}/{@code channel}, {@code z}/{@code depth} (case-insensitive; null
-     * labels ignored). The first axis with a given meaning wins.
+     * Derive the mapping from the tensor's {@code dim_labels} using {@link AxisMap#roleOf} (null
+     * labels ignored). Two axes with the same role throw {@link IllegalArgumentException}, as in
+     * {@link AxisMap}.
      */
     public static PlaneMap fromDimLabels(List<String> labels) {
+        StringBuilder roles = new StringBuilder();
+        for (String l : labels) {
+            String r = AxisMap.roleOf(l);
+            roles.append(r == null || "yxs".contains(r) ? "-" : r);
+        }
+        return fromRoles(roles.toString());
+    }
+
+    /** Mapping from the roles resolved for an opened image, so an axis override reaches ROI placement. */
+    public static PlaneMap fromAxisMap(AxisMap map) {
+        return fromRoles(map.roles());
+    }
+
+    /** From a role string (one letter per axis; only {@code t c z} are used; duplicates throw). */
+    public static PlaneMap fromRoles(String roles) {
         Map<Integer, Dim> m = new HashMap<>();
-        for (int i = 0; i < labels.size(); i++) {
-            if (labels.get(i) == null) {
-                continue;
-            }
+        for (int i = 0; i < roles.length(); i++) {
             Dim d = null;
-            switch (labels.get(i).toLowerCase(Locale.ROOT)) {
-                case "t": case "time":
-                    d = Dim.T;
-                    break;
-                case "c": case "ch": case "channel":
-                    d = Dim.C;
-                    break;
-                case "z": case "depth":
-                    d = Dim.Z;
-                    break;
+            switch (roles.charAt(i)) {
+                case 't': d = Dim.T; break;
+                case 'c': d = Dim.C; break;
+                case 'z': d = Dim.Z; break;
                 default:
             }
-            if (d != null && !m.containsValue(d)) {
+            if (d != null) {
+                if (m.containsValue(d)) {
+                    throw new IllegalArgumentException("Axis role " + roles.charAt(i) + " assigned twice in \"" + roles + "\"");
+                }
                 m.put(i, d);
             }
         }

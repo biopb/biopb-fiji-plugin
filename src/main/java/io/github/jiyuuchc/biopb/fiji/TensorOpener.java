@@ -44,8 +44,10 @@ public final class TensorOpener {
         private final long[] scaleHint;
         private final String reductionMethod;
         private final double scaleX, scaleY;
+        private final AxisMap axes;
 
         LevelInfo(String arrayId, int level, long[] scaleHint, String reductionMethod, AxisMap map) {
+            this.axes = map;
             this.arrayId = arrayId;
             this.level = level;
             this.scaleHint = scaleHint.clone();
@@ -68,6 +70,21 @@ public final class TensorOpener {
         public long[] getScaleHint() { return scaleHint.clone(); }
         /** Reduction method used for this level (may be empty at level 0). */
         public String getReductionMethod() { return reductionMethod; }
+        /** The roles resolved for the tensor's axes (honouring any axis override), e.g. {@code "tczyx"}. */
+        public String getRoles() { return axes.roles(); }
+        /** The resolved axis map. */
+        public AxisMap getAxisMap() { return axes; }
+        /**
+         * Per-axis downsampling factors as doubles, aligned with the descriptor's axes; this is the
+         * {@code axisScale} argument of {@link PlaneMap}{@code .place}.
+         */
+        public double[] getAxisScale() {
+            double[] a = new double[scaleHint.length];
+            for (int i = 0; i < a.length; i++) a[i] = scaleHint[i];
+            return a;
+        }
+        /** Plane placement for ROIs, built from the resolved roles (so an override applies). */
+        public PlaneMap toPlaneMap() { return PlaneMap.fromAxisMap(axes); }
         /** Downsampling factor along x. */
         public double getScaleX() { return scaleX; }
         /** Downsampling factor along y. */
@@ -95,7 +112,8 @@ public final class TensorOpener {
                                  long maxPlanePixels) {
         TensorDescriptor d = client.getDescriptor(arrayId);
         List<PyramidLevel> pyramid = d.getPyramidList();
-        long[] shape = toArray(d.getShapeList());
+        long[] shape0 = toArray(d.getShapeList());
+        long[] shape = shape0;
         long[] hint = ones(shape.length);
         String method = "";
         if (level < 0 || (level > 0 && level >= pyramid.size())) {
@@ -108,8 +126,10 @@ public final class TensorOpener {
             method = p.getReductionMethod();
             shape = toArray(p.getShapeList());
         }
-        AxisMap map = AxisMap.resolve(d.getDimLabelsList(), shape, axisOverride);
-        checkPlaneSize(shape, map, level, pyramid, maxPlanePixels);
+        // Roles are resolved once, on the level-0 shape, so singleton-ness never depends on the level.
+        AxisMap map = AxisMap.resolve(d.getDimLabelsList(), shape0, axisOverride);
+        PlaneSource.Kind kind = SdkPlaneSource.kindOf(d.getDtype(), map.s >= 0); // rejects bad dtypes now
+        checkPlaneSize(shape, map, level, pyramid, maxPlanePixels, kind.bytesPerPixel());
 
         RandomAccessibleInterval<?> tensor = level == 0
                 ? client.getTensor(arrayId)
@@ -130,6 +150,10 @@ public final class TensorOpener {
      * Server-independent; this is what {@link #open} uses once the source exists.
      */
     public static ImagePlus assemble(PlaneSource src, String title) {
+        if (src.getKind() == PlaneSource.Kind.RGB && src.getSizeC() > 1) {
+            throw new IllegalArgumentException("RGB with " + src.getSizeC() + " channels is not supported "
+                    + "(ImageJ cannot make a composite of RGB images)");
+        }
         TensorVirtualStack stack = new TensorVirtualStack(src);
         ImagePlus imp = new ImagePlus(title, stack);
         int c = src.getSizeC(), z = src.getSizeZ(), t = src.getSizeT();
@@ -137,10 +161,10 @@ public final class TensorOpener {
         imp.setOpenAsHyperStack(c > 1 || t > 1);
         if (c > 1) {
             imp = new CompositeImage(imp, IJ.COMPOSITE);
-            // Same cheap range on every channel (taken from channel 1 of the first plane).
+            // Per-channel cheap range, sampled from each channel's first plane (one read per channel).
             if (src.getKind() == PlaneSource.Kind.GRAY16 || src.getKind() == PlaneSource.Kind.GRAY32) {
-                double[] r = stack.getDisplayRange();
                 for (int ch = 1; ch <= c; ch++) {
+                    double[] r = stack.getDisplayRange(ch - 1);
                     imp.setC(ch);
                     imp.setDisplayRange(r[0], r[1]);
                 }
@@ -173,9 +197,10 @@ public final class TensorOpener {
         return s * hint[axis];
     }
 
-    static void checkPlaneSize(long[] shape, AxisMap map, int level, List<PyramidLevel> pyramid, long limit) {
+    static void checkPlaneSize(long[] shape, AxisMap map, int level, List<PyramidLevel> pyramid, long limit,
+                               int bytesPerPixel) {
         long px = planePixels(shape, map);
-        long max = Math.min(limit, Integer.MAX_VALUE);
+        long max = TensorVirtualStack.maxPlanePixels(limit, bytesPerPixel);
         if (px <= max) return;
         String hintText = "no coarser pyramid level is available";
         for (int k = level + 1; k < pyramid.size(); k++) {
@@ -185,7 +210,7 @@ public final class TensorOpener {
             }
         }
         throw new PlaneTooLargeException("A single plane at level " + level + " has " + px + " pixels (limit " + max
-                + "); " + hintText, px, max);
+                + ", from the plane limit, ImageJ's array size and available heap); " + hintText, px, max);
     }
 
     private static long planePixels(long[] shape, AxisMap map) {

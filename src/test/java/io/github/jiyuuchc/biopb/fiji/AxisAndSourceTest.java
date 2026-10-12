@@ -190,9 +190,9 @@ public class AxisAndSourceTest {
                 biopb.tensor.PyramidLevel.newBuilder().addShape(100).addShape(100).build(),
                 biopb.tensor.PyramidLevel.newBuilder().addShape(50).addShape(50).build(),
                 biopb.tensor.PyramidLevel.newBuilder().addShape(10).addShape(10).build());
-        TensorOpener.checkPlaneSize(new long[] {10, 10}, m, 2, pyr, 100); // fits
+        TensorOpener.checkPlaneSize(new long[] {10, 10}, m, 2, pyr, 100, 2); // fits
         try {
-            TensorOpener.checkPlaneSize(new long[] {100, 100}, m, 0, pyr, 200);
+            TensorOpener.checkPlaneSize(new long[] {100, 100}, m, 0, pyr, 200, 2);
             fail();
         } catch (PlaneTooLargeException e) {
             assertTrue(e.getMessage(), e.getMessage().contains("level 2"));
@@ -200,10 +200,77 @@ public class AxisAndSourceTest {
             assertEquals(200, e.getLimit());
         }
         try {
-            TensorOpener.checkPlaneSize(new long[] {10, 10}, m, 2, pyr, 50);
+            TensorOpener.checkPlaneSize(new long[] {10, 10}, m, 2, pyr, 50, 2);
             fail();
         } catch (PlaneTooLargeException e) {
             assertTrue(e.getMessage().contains("no coarser"));
         }
+    }
+
+    @Test
+    public void overrideReachesRoiPlacement() {
+        // labels say t,c but the override says the first axis is z.
+        AxisMap m = AxisMap.resolve(L("t", "c", "y", "x"), new long[] {3, 2, 5, 6}, "zcyx");
+        ij.ImagePlus imp = TensorOpener.assemble(new FakePlaneSource(2, 3, 1), "x");
+        ij.gui.Roi roi = new ij.gui.Roi(0, 0, 2, 2);
+        PlaneMap.fromAxisMap(m).place(roi, java.util.Collections.singletonMap(0, 2), imp, null);
+        assertEquals(3, roi.getZPosition());
+        assertEquals(0, roi.getTPosition());
+        // without the override the same pin lands on T (and is out of range for a 1-frame image)
+        ij.gui.Roi roi2 = new ij.gui.Roi(0, 0, 2, 2);
+        try {
+            PlaneMap.fromAxisMap(AxisMap.resolve(L("t", "c", "y", "x"), new long[] {3, 2, 5, 6}, null))
+                    .place(roi2, java.util.Collections.singletonMap(0, 2), imp, null);
+            fail();
+        } catch (RoiConverter.SkipException expected) { }
+    }
+
+    @Test
+    public void sharedAliasTableAndDuplicatePolicy() {
+        assertEquals("z", AxisMap.roleOf("Depth"));
+        assertEquals("c", AxisMap.roleOf(" CH "));
+        assertEquals(null, AxisMap.roleOf("foo"));
+        assertEquals(1, PlaneMap.fromDimLabels(L("depth", "y", "x")) == null ? 0 : 1);
+        try { PlaneMap.fromDimLabels(L("z", "depth", "y", "x")); fail(); } catch (IllegalArgumentException expected) { }
+        rejects(L("z", "depth", "y", "x"), new long[] {2, 2, 4, 4}, null, "twice");
+    }
+
+    @Test
+    public void levelInfoCarriesRolesAndScales() {
+        AxisMap m = AxisMap.resolve(L("t", "c", "y", "x"), new long[] {3, 2, 5, 6}, "zcyx");
+        TensorOpener.LevelInfo li = new TensorOpener.LevelInfo("id", 1, new long[] {1, 1, 4, 2}, "mean", m);
+        assertEquals("zcyx", li.getRoles());
+        assertArrayEquals(new double[] {1, 1, 4, 2}, li.getAxisScale(), 0);
+        assertEquals(2, li.getScaleX(), 0);
+        assertEquals(4, li.getScaleY(), 0);
+        assertEquals("-cyx", AxisMap.resolve(L("a", "c", "y", "x"), new long[] {1, 2, 5, 6}, null).roles());
+    }
+
+    @Test
+    public void rgbWithChannelsRejected() {
+        rejects(L("c", "y", "x", "s"), new long[] {2, 4, 4, 3}, null, "RGB");
+        AxisMap.resolve(L("c", "y", "x", "s"), new long[] {1, 4, 4, 3}, null); // single channel is fine
+        try {
+            TensorOpener.assemble(new FakePlaneSource(4, 4, 2, 1, 1, PlaneSource.Kind.RGB), "x");
+            fail();
+        } catch (IllegalArgumentException expected) { }
+    }
+
+    @Test
+    public void dtypeMatchingIsStrict() {
+        for (String d : new String[] {"<U5", "|S3", "O", "M8", "m8", "<M8[ns]", "U1", "<F4", "<u3", "", "<c8", "<f1"}) {
+            try {
+                SdkPlaneSource.kindOf(d, false);
+                fail(d);
+            } catch (IllegalArgumentException e) {
+                assertTrue(e.getMessage().contains("Unsupported dtype"));
+            }
+        }
+    }
+
+    @Test
+    public void sizeLimits() {
+        rejects(L("c", "z", "y", "x"), new long[] {100000, 100000, 4, 4}, null, "stack limit");
+        rejects(L("t", "y", "x"), new long[] {3000000000L, 4, 4}, null, "too large");
     }
 }

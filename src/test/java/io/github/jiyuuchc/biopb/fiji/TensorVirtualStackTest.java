@@ -144,4 +144,90 @@ public class TensorVirtualStackTest {
             assertEquals("boom", expected.getMessage());
         }
     }
+
+    @Test
+    public void readOnly() {
+        TensorVirtualStack s = new TensorVirtualStack(new FakePlaneSource(1, 2, 1));
+        ImageProcessor ip = s.getProcessor(1);
+        Runnable[] ops = {
+            () -> s.addSlice("x"), () -> s.addSlice("x", new short[24]), () -> s.addSlice(ip),
+            () -> s.addSlice("x", ip), () -> s.addSlice("x", ip, 1), () -> s.deleteSlice(1),
+            () -> s.deleteLastSlice(), () -> s.setProcessor(ip, 1),
+        };
+        for (Runnable op : ops) {
+            try {
+                op.run();
+                fail();
+            } catch (UnsupportedOperationException e) {
+                assertTrue(e.getMessage().contains("read-only"));
+            }
+        }
+        s.setPixels(new short[24], 1); // ImageJ calls this itself; must be a harmless no-op
+        assertEquals(0, s.getProcessor(1).get(0, 0));
+        assertEquals(2, s.getSize());
+    }
+
+    @Test
+    public void concurrentMissesShareOneRead() throws Exception {
+        final java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+        final FakePlaneSource src = new FakePlaneSource(1, 1, 1) {
+            @Override public Object readPlane(int t, int c, int z) {
+                try { gate.await(); } catch (InterruptedException e) { throw new RuntimeException(e); }
+                return super.readPlane(t, c, z);
+            }
+        };
+        final TensorVirtualStack s = new TensorVirtualStack(src);
+        ExecutorService ex = Executors.newFixedThreadPool(6);
+        try {
+            List<Future<Object>> fs = new ArrayList<>();
+            for (int k = 0; k < 6; k++) {
+                fs.add(ex.submit(new Callable<Object>() {
+                    @Override public Object call() { return s.getPixels(1); }
+                }));
+            }
+            Thread.sleep(200);
+            gate.countDown();
+            for (Future<Object> f : fs) f.get();
+            assertEquals(1, src.reads.get());
+        } finally {
+            ex.shutdownNow();
+        }
+    }
+
+    @Test
+    public void hugePlaneRefusedUpFront() {
+        try {
+            new TensorVirtualStack(new FakePlaneSource(40000, 40000, 1, 1, 1, PlaneSource.Kind.RGB));
+            fail();
+        } catch (PlaneTooLargeException e) {
+            assertTrue(e.getMessage().contains("coarser"));
+        }
+        assertEquals(4, PlaneSource.Kind.RGB.bytesPerPixel());
+    }
+
+    @Test
+    public void userDisplayRangeSurvivesSliceChange() {
+        ImagePlus imp = TensorOpener.assemble(new FakePlaneSource(1, 3, 1), "x");
+        imp.setDisplayRange(1, 4);
+        imp.setSlice(2);
+        imp.setSlice(3);
+        assertEquals(1, imp.getDisplayRangeMin(), 0);
+        assertEquals(4, imp.getDisplayRangeMax(), 0);
+    }
+
+    @Test
+    public void perChannelRangesAndFallback() {
+        PlaneSource src = new FakePlaneSource(2, 1, 1) {
+            @Override public Object readPlane(int t, int c, int z) {
+                short[] a = new short[w * h];
+                for (int i = 0; i < a.length; i++) a[i] = (short) (i % 2 == 0 ? 0 : 10 * (c + 1));
+                return a;
+            }
+        };
+        TensorVirtualStack s = new TensorVirtualStack(src);
+        assertEquals(10, s.getDisplayRange(0)[1], 0);
+        assertEquals(20, s.getDisplayRange(1)[1], 0);
+        double[] r = TensorVirtualStack.sampleRange(new short[16], PlaneSource.Kind.GRAY16, 4, 4);
+        assertEquals(65535, r[1], 0);
+    }
 }

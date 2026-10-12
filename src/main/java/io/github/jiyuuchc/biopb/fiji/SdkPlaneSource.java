@@ -34,17 +34,37 @@ public class SdkPlaneSource implements PlaneSource {
         this.rai = rai;
         this.map = map;
         this.kind = kindOf(dtype, map.s >= 0);
-        this.w = (int) rai.dimension(map.x);
-        this.h = (int) rai.dimension(map.y);
-        this.sizeC = map.c >= 0 ? (int) rai.dimension(map.c) : 1;
-        this.sizeZ = map.z >= 0 ? (int) rai.dimension(map.z) : 1;
-        this.sizeT = map.t >= 0 ? (int) rai.dimension(map.t) : 1;
+        long[] shape = new long[rai.numDimensions()];
+        rai.dimensions(shape);
+        long px = shape[map.x] * shape[map.y];
+        if (shape[map.x] > Integer.MAX_VALUE || shape[map.y] > Integer.MAX_VALUE || px > Integer.MAX_VALUE) {
+            throw new PlaneTooLargeException("Plane of " + shape[map.x] + " x " + shape[map.y]
+                    + " pixels is too large for ImageJ; use a coarser pyramid level", px, Integer.MAX_VALUE);
+        }
+        this.w = (int) shape[map.x];
+        this.h = (int) shape[map.y];
+        long c = map.c >= 0 ? shape[map.c] : 1, z = map.z >= 0 ? shape[map.z] : 1, t = map.t >= 0 ? shape[map.t] : 1;
+        if (c > Integer.MAX_VALUE || z > Integer.MAX_VALUE || t > Integer.MAX_VALUE
+                || c * z > Integer.MAX_VALUE || c * z * t > Integer.MAX_VALUE || c * z * t < 0) {
+            throw new IllegalArgumentException("c*z*t = " + c + "*" + z + "*" + t + " exceeds ImageJ's stack limit of 2^31-1");
+        }
+        this.sizeC = (int) c;
+        this.sizeZ = (int) z;
+        this.sizeT = (int) t;
     }
 
-    /** Maps a numpy dtype string to the plane format used for it (see class doc). */
+    /**
+     * Maps a numpy dtype string to the plane format used for it (see class doc). Matching is
+     * case-sensitive and accepts only numeric kinds: {@code [<>|=]?} followed by u/i/f with size
+     * 1/2/4/8 (f also 2) or {@code b1}; anything else ({@code <U5}, {@code |S3}, {@code O},
+     * {@code M8}, {@code m8}, ...) is rejected.
+     */
     static Kind kindOf(String dtype, boolean hasSamples) {
-        String d = dtype == null ? "" : dtype.trim().toLowerCase(Locale.ROOT).replaceFirst("^[<>|=]", "");
-        if (!d.matches("[uifb]\\d+")) throw new IllegalArgumentException("Unsupported dtype \"" + dtype + "\"");
+        String d = dtype == null ? "" : dtype.trim();
+        if (!d.matches("[<>|=]?([ui][1248]|f[248]|b1)")) {
+            throw new IllegalArgumentException("Unsupported dtype \"" + dtype + "\" (numeric types only)");
+        }
+        d = d.replaceFirst("^[<>|=]", "");
         if (hasSamples) {
             if (!d.equals("u1")) {
                 throw new IllegalArgumentException("A sample (RGB) axis requires uint8, not \"" + dtype + "\"");
