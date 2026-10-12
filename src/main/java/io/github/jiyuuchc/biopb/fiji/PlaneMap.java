@@ -31,16 +31,20 @@ public final class PlaneMap {
 
     /**
      * Derive the mapping from the tensor's {@code dim_labels} using {@link AxisMap#roleOf} (null
-     * labels ignored). Two axes with the same role throw {@link IllegalArgumentException}, as in
-     * {@link AxisMap}.
+     * labels ignored). Lenient: when two axes have the same role the first wins. The strict,
+     * authoritative path for an opened image is {@code LevelInfo.toPlaneMap()}
+     * ({@link #fromAxisMap}), which reflects any axis override.
      */
     public static PlaneMap fromDimLabels(List<String> labels) {
-        StringBuilder roles = new StringBuilder();
-        for (String l : labels) {
-            String r = AxisMap.roleOf(l);
-            roles.append(r == null || "yxs".contains(r) ? "-" : r);
+        Map<Integer, Dim> m = new HashMap<>();
+        for (int i = 0; i < labels.size(); i++) {
+            String r = AxisMap.roleOf(labels.get(i));
+            Dim d = r == null ? null : r.equals("t") ? Dim.T : r.equals("c") ? Dim.C : r.equals("z") ? Dim.Z : null;
+            if (d != null && !m.containsValue(d)) {
+                m.put(i, d);
+            }
         }
-        return fromRoles(roles.toString());
+        return new PlaneMap(m);
     }
 
     /** Mapping from the roles resolved for an opened image, so an axis override reaches ROI placement. */

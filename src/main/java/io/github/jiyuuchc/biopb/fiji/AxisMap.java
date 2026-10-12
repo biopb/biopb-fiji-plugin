@@ -50,7 +50,7 @@ public final class AxisMap {
                         + " characters but the tensor has " + n + " axes");
             }
             for (int d = 0; d < n; d++) assign(r, o.substring(d, d + 1), d, shape);
-        } else if (isUnlabeled(labels)) {
+        } else if (isUnlabeled(labels, n)) {
             for (int d = 0; d < n - 2; d++) {
                 if (shape[d] != 1) {
                     throw new IllegalArgumentException("Tensor has " + n + " unlabeled axes (shape "
@@ -63,7 +63,7 @@ public final class AxisMap {
             r[4] = n - 1;
         } else {
             for (int d = 0; d < n; d++) {
-                String l = d < labels.size() ? labels.get(d).trim() : "";
+                String l = labels.get(d) == null ? "" : labels.get(d).trim();
                 String role = roleOf(l);
                 if (role == null) {
                     if (shape[d] != 1) {
@@ -86,7 +86,11 @@ public final class AxisMap {
                 throw new IllegalArgumentException("Axis " + a + " has size " + shape[a] + ", too large for ImageJ");
             }
         }
-        for (int a : new int[] {r[0], r[1], r[2]}) if (a >= 0) czt *= shape[a];
+        try {
+            for (int a : new int[] {r[0], r[1], r[2]}) if (a >= 0) czt = Math.multiplyExact(czt, shape[a]);
+        } catch (ArithmeticException e) {
+            czt = Long.MAX_VALUE;
+        }
         if (czt > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("c*z*t = " + czt + " planes exceeds ImageJ's stack limit of 2^31-1");
         }
@@ -144,9 +148,13 @@ public final class AxisMap {
         return new String(r);
     }
 
-    private static boolean isUnlabeled(List<String> labels) {
-        if (labels == null || labels.isEmpty()) return true;
-        for (String l : labels) if (!UNLABELED.matcher(l.trim()).matches()) return false;
+    /** No labels, fewer labels than axes, or every label blank / {@code dimN}. */
+    private static boolean isUnlabeled(List<String> labels, int n) {
+        if (labels == null || labels.size() < n) return true;
+        for (String l : labels) {
+            String t = l == null ? "" : l.trim();
+            if (!t.isEmpty() && !UNLABELED.matcher(t).matches()) return false;
+        }
         return true;
     }
 }

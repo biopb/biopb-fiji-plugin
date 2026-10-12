@@ -231,7 +231,7 @@ public class AxisAndSourceTest {
         assertEquals("c", AxisMap.roleOf(" CH "));
         assertEquals(null, AxisMap.roleOf("foo"));
         assertEquals(1, PlaneMap.fromDimLabels(L("depth", "y", "x")) == null ? 0 : 1);
-        try { PlaneMap.fromDimLabels(L("z", "depth", "y", "x")); fail(); } catch (IllegalArgumentException expected) { }
+        try { PlaneMap.fromRoles("zzyx"); fail(); } catch (IllegalArgumentException expected) { }
         rejects(L("z", "depth", "y", "x"), new long[] {2, 2, 4, 4}, null, "twice");
     }
 
@@ -272,5 +272,46 @@ public class AxisAndSourceTest {
     public void sizeLimits() {
         rejects(L("c", "z", "y", "x"), new long[] {100000, 100000, 4, 4}, null, "stack limit");
         rejects(L("t", "y", "x"), new long[] {3000000000L, 4, 4}, null, "too large");
+    }
+
+    @Test
+    public void blankOrShortLabelsAreUnlabeled() {
+        AxisMap m = AxisMap.resolve(L("", ""), new long[] {5, 6}, null);
+        assertEquals(0, m.y); assertEquals(1, m.x);
+        m = AxisMap.resolve(L("y"), new long[] {1, 5, 6}, null); // fewer labels than axes
+        assertEquals(1, m.y); assertEquals(2, m.x);
+        m = AxisMap.resolve(L("", "dim1", " "), new long[] {1, 5, 6}, null);
+        assertEquals(2, m.x);
+        rejects(L("", "", ""), new long[] {4, 5, 6}, null, "override");
+        rejects(L("z"), new long[] {4, 5, 6}, null, "override");
+    }
+
+    @Test
+    public void cztOverflowIsReportedNotWrapped() {
+        rejects(L("c", "z", "t", "y", "x"), new long[] {2000000000L, 2000000000L, 2000000000L, 4, 4}, null, "stack limit");
+    }
+
+    @Test
+    public void shortScaleHintRejected() {
+        AxisMap m = AxisMap.resolve(L("t", "y", "x"), new long[] {2, 5, 6}, null);
+        try {
+            TensorOpener.applyCalibration(new Calibration(), m, Arrays.asList(1.0, 1.0, 1.0), Arrays.asList("s", "um", "um"),
+                    new long[] {1, 2});
+            fail();
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("scale hint"));
+        }
+        try {
+            new TensorOpener.LevelInfo("id", 1, new long[] {1}, "mean", m);
+            fail();
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("scale hint"));
+        }
+    }
+
+    @Test
+    public void lenientDimLabelsFirstWins() {
+        // lenient path (merged ROI code): no exception, first axis wins
+        PlaneMap.fromDimLabels(L("z", "depth", "y", "x"));
     }
 }

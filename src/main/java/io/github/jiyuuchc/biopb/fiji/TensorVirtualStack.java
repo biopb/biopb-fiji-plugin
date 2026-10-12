@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.function.LongSupplier;
 
 /**
  * A lazy {@link ij.ImageStack} whose planes are read on demand from a {@link PlaneSource}.
@@ -33,7 +35,7 @@ public class TensorVirtualStack extends VirtualStack {
     /** Default number of planes kept in the LRU cache. */
     public static final int DEFAULT_CACHE_PLANES = 4;
     /** Copies of a plane alive at once while serving it: cache entry, returned clone, temporary read. */
-    private static final int WORKING_COPIES = 3;
+    private static final int RESIDENT_EXTRA = 2;
     private static final double HEAP_FRACTION = 0.6;
     private static final long MAX_CACHE_BYTES = 256L << 20;
     private static final int SAMPLE_TARGET = 1 << 16;
@@ -43,7 +45,7 @@ public class TensorVirtualStack extends VirtualStack {
     private final int cacheSize;
     private final Map<Integer, Object> cache = new LinkedHashMap<>(8, 0.75f, true);
     private final Map<Integer, CompletableFuture<Object>> inFlight = new HashMap<>(); // guarded by cache
-    private final double[][] ranges; // per channel, lazily filled; entries are immutable once set
+    private final AtomicReferenceArray<double[]> ranges; // per channel; arrays are immutable once published
 
     /** Creates a stack over {@code source} with the default cache size. */
     public TensorVirtualStack(PlaneSource source) {
@@ -56,21 +58,29 @@ public class TensorVirtualStack extends VirtualStack {
      *                    about 256 MB at most (but never fewer than one plane)
      */
     public TensorVirtualStack(PlaneSource source, int cachePlanes) {
+        this(source, cachePlanes, Runtime.getRuntime()::maxMemory);
+    }
+
+    /** As above with an injectable max-heap supplier (for tests). */
+    TensorVirtualStack(PlaneSource source, int cachePlanes, LongSupplier maxMemory) {
         super(source.getWidth(), source.getHeight(), null, "");
         this.source = source;
         this.sizeC = source.getSizeC();
         this.sizeZ = source.getSizeZ();
         this.sizeT = source.getSizeT();
         long planeBytes = (long) source.getWidth() * source.getHeight() * source.getKind().bytesPerPixel();
-        this.ranges = new double[sizeC][];
-        long maxPx = maxPlanePixels(Long.MAX_VALUE, source.getKind().bytesPerPixel());
-        if ((long) source.getWidth() * source.getHeight() > maxPx) {
+        this.ranges = new AtomicReferenceArray<>(sizeC);
+        long px = (long) source.getWidth() * source.getHeight();
+        long maxPx = maxPlanePixels(Long.MAX_VALUE, source.getKind().bytesPerPixel(), maxMemory);
+        if (px > maxPx) {
             throw new PlaneTooLargeException("A " + source.getWidth() + " x " + source.getHeight() + " plane needs about "
-                    + (planeBytes * WORKING_COPIES >> 20) + " MB of working memory but only " + (Runtime.getRuntime().maxMemory() >> 20)
-                    + " MB heap is available; use a coarser pyramid level or give Fiji more memory",
-                    (long) source.getWidth() * source.getHeight(), maxPx);
+                    + (planeBytes * (RESIDENT_EXTRA + 1) >> 20) + " MB of working memory but only " + (maxMemory.getAsLong() >> 20)
+                    + " MB heap is available; use a coarser pyramid level or give Fiji more memory", px, maxPx);
         }
-        this.cacheSize = (int) Math.max(1, Math.min(cachePlanes, MAX_CACHE_BYTES / Math.max(1, planeBytes)));
+        // Resident planes at peak = cacheSize (+1 while inserting) + the clone + the temporary read,
+        // i.e. cacheSize + 2; they must all fit in the heap budget.
+        long fitInHeap = (long) (maxMemory.getAsLong() * HEAP_FRACTION / Math.max(1, planeBytes)) - RESIDENT_EXTRA;
+        this.cacheSize = (int) Math.max(1, Math.min(Math.min(cachePlanes, MAX_CACHE_BYTES / Math.max(1, planeBytes)), fitInHeap));
     }
 
     /**
@@ -80,9 +90,15 @@ public class TensorVirtualStack extends VirtualStack {
      * @param bytesPerPixel size of one pixel of the returned array (see {@link PlaneSource.Kind#bytesPerPixel})
      */
     public static long maxPlanePixels(long limit, int bytesPerPixel) {
-        long heap = (long) (Runtime.getRuntime().maxMemory() * HEAP_FRACTION / (WORKING_COPIES * (double) bytesPerPixel));
+        return maxPlanePixels(limit, bytesPerPixel, Runtime.getRuntime()::maxMemory);
+    }
+
+    static long maxPlanePixels(long limit, int bytesPerPixel, LongSupplier maxMemory) {
+        long heap = (long) (maxMemory.getAsLong() * HEAP_FRACTION / ((RESIDENT_EXTRA + 1) * (double) bytesPerPixel));
         return Math.min(Math.min(limit, Integer.MAX_VALUE), heap);
     }
+
+    int cacheSizeForTest() { return cacheSize; }
 
     /** The underlying plane source. */
     public PlaneSource getSource() { return source; }
@@ -144,7 +160,8 @@ public class TensorVirtualStack extends VirtualStack {
 
     /**
      * Deliberately a no-op: ImageJ itself calls this when it swaps the displayed processor, so
-     * throwing would break display. Edits to a plane are discarded, never written back.
+     * throwing would break display. Edits to a plane are discarded, never written back (ImageJ
+     * itself refuses most in-place processing on virtual stacks and offers to convert them).
      */
     @Override public void setPixels(Object pixels, int n) { }
 
@@ -165,7 +182,13 @@ public class TensorVirtualStack extends VirtualStack {
             default: return new ColorProcessor(w, h, (int[]) px);
         }
         // Fixing the range up front stops ImageJ from scanning the whole plane for min/max.
-        double[] r = getDisplayRange((n - 1) % sizeC);
+        // No I/O here: use the stored range, or sample the plane we already hold.
+        int ch = (n - 1) % sizeC;
+        double[] r = ranges.get(ch);
+        if (r == null) {
+            ranges.compareAndSet(ch, null, sampleRange(px, source.getKind(), source.getWidth(), source.getHeight()));
+            r = ranges.get(ch);
+        }
         ip.setMinAndMax(r[0], r[1]);
         return ip;
     }
@@ -176,19 +199,21 @@ public class TensorVirtualStack extends VirtualStack {
     /**
      * A cheap display range for a channel (0-based): 0-255 for 8-bit and RGB, otherwise the
      * min/max of a strided sample (about 64k pixels) of that channel's first plane, computed once
-     * and outside any lock. A constant or empty plane falls back to the dtype range (0-65535 for
+     * and outside any lock (this may read that plane from the server: call from a worker thread;
+     * {@link #getProcessor} itself never triggers this). A constant or empty plane falls back to the dtype range (0-65535 for
      * 16-bit; value to value+1 for float). Never scans a full plane.
      *
      * @return {@code {min, max}}
      */
     public double[] getDisplayRange(int channel) {
-        double[] r = ranges[channel];
+        double[] r = ranges.get(channel);
         if (r == null) {
             switch (source.getKind()) {
                 case GRAY8: case RGB: r = new double[] {0, 255}; break;
                 default: r = sampleRange(getPlane(channel), source.getKind(), source.getWidth(), source.getHeight());
             }
-            ranges[channel] = r; // benign race: racing threads compute equal values
+            ranges.compareAndSet(channel, null, r);
+            r = ranges.get(channel);
         }
         return r.clone();
     }

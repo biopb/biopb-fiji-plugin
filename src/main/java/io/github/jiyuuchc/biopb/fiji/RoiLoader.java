@@ -120,6 +120,22 @@ public final class RoiLoader {
         }
     }
 
+    /**
+     * Load for an image opened by {@link TensorOpener}: roles, level scales and the x/y factors come
+     * from its {@link TensorOpener.LevelInfo}. If the roles cannot form a plane map, pinned
+     * annotations are skipped (with a reason) instead of failing the load.
+     */
+    public static Result load(RoiSource source, String arrayId, String setName, ImagePlus imp,
+            TensorOpener.LevelInfo info) throws IOException {
+        PlaneMap planes;
+        try {
+            planes = info.toPlaneMap();
+        } catch (IllegalArgumentException e) {
+            planes = null;
+        }
+        return load(source, arrayId, setName, imp, planes, info.getAxisScale(), info.getScaleX(), info.getScaleY());
+    }
+
     /** Against a live client. */
     public static Result load(TensorFlightClient client, String arrayId, String setName,
             ImagePlus imp, PlaneMap planes, double sx, double sy) throws IOException {
@@ -150,13 +166,19 @@ public final class RoiLoader {
     public static Result load(RoiSource source, String arrayId, String setName, ImagePlus imp,
             PlaneMap planes, double[] axisScale, double sx, double sy) throws IOException {
         RoiListResult res = source.list(arrayId, setName);
+        // A null plane map (e.g. its construction failed) must not abort the load: annotations
+        // that need plane placement are skipped with a reason, unpinned ones still load.
         List<Roi> rois = new ArrayList<>();
         Map<String, Integer> reasons = new TreeMap<>();
         int skipped = 0;
         for (RoiAnnotation a : res.getRoisList()) {
             try {
                 Roi r = RoiConverter.toRoi(a, sx, sy);
-                planes.place(r, a.getPlaneMap(), imp, axisScale);
+                if (planes != null) {
+                    planes.place(r, a.getPlaneMap(), imp, axisScale);
+                } else if (!a.getPlaneMap().isEmpty()) {
+                    throw new RoiConverter.SkipException("no usable axis-to-plane mapping");
+                }
                 rois.add(r);
             } catch (RoiConverter.SkipException e) {
                 skipped++;

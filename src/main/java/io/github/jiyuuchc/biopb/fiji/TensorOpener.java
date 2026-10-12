@@ -47,6 +47,10 @@ public final class TensorOpener {
         private final AxisMap axes;
 
         LevelInfo(String arrayId, int level, long[] scaleHint, String reductionMethod, AxisMap map) {
+            if (scaleHint.length != map.ndim) {
+                throw new IllegalArgumentException("scale hint has " + scaleHint.length + " entries but the tensor has "
+                        + map.ndim + " axes");
+            }
             this.axes = map;
             this.arrayId = arrayId;
             this.level = level;
@@ -103,6 +107,10 @@ public final class TensorOpener {
      * @param arrayId        tensor id
      * @param level          pyramid level (0 = full resolution)
      * @param axisOverride   role string per axis (e.g. {@code "tzyx"}) or null to use the labels
+     *
+     * <p>Blocking (server round trips and one plane read per channel): call from a worker thread,
+     * not the EDT.
+     *
      * @param maxPlanePixels refuse planes with more pixels than this (and always more than 2^31-1)
      * @return the image; its {@link LevelInfo} is available via {@link LevelInfo#of}
      * @throws IllegalArgumentException    for unsupported axes/dtypes or an invalid level
@@ -147,7 +155,9 @@ public final class TensorOpener {
 
     /**
      * Wraps a plane source in a virtual-stack hyperstack (composite mode when it has several channels).
-     * Server-independent; this is what {@link #open} uses once the source exists.
+     * Server-independent; this is what {@link #open} uses once the source exists. Reads the first
+     * plane of every channel to set display ranges, synchronously: call from a worker thread,
+     * never the EDT.
      */
     public static ImagePlus assemble(PlaneSource src, String title) {
         if (src.getKind() == PlaneSource.Kind.RGB && src.getSizeC() > 1) {
@@ -155,21 +165,27 @@ public final class TensorOpener {
                     + "(ImageJ cannot make a composite of RGB images)");
         }
         TensorVirtualStack stack = new TensorVirtualStack(src);
-        ImagePlus imp = new ImagePlus(title, stack);
         int c = src.getSizeC(), z = src.getSizeZ(), t = src.getSizeT();
+        boolean ranged = src.getKind() == PlaneSource.Kind.GRAY16 || src.getKind() == PlaneSource.Kind.GRAY32;
+        double[][] ranges = new double[c][];
+        if (ranged && c > 1) {
+            for (int ch = 0; ch < c; ch++) ranges[ch] = stack.getDisplayRange(ch); // one plane read per channel
+        }
+        ImagePlus imp = new ImagePlus(title, stack); // reads (and range-samples) the first plane
         imp.setDimensions(c, z, t);
         imp.setOpenAsHyperStack(c > 1 || t > 1);
         if (c > 1) {
-            imp = new CompositeImage(imp, IJ.COMPOSITE);
-            // Per-channel cheap range, sampled from each channel's first plane (one read per channel).
-            if (src.getKind() == PlaneSource.Kind.GRAY16 || src.getKind() == PlaneSource.Kind.GRAY32) {
+            CompositeImage ci = new CompositeImage(imp, IJ.COMPOSITE);
+            if (ranged) {
+                // Write each channel's LUT range directly: no setC, so nothing is re-rendered or re-read.
                 for (int ch = 1; ch <= c; ch++) {
-                    double[] r = stack.getDisplayRange(ch - 1);
-                    imp.setC(ch);
-                    imp.setDisplayRange(r[0], r[1]);
+                    ij.process.LUT lut = ci.getChannelLut(ch);
+                    lut.min = ranges[ch - 1][0];
+                    lut.max = ranges[ch - 1][1];
+                    ci.setChannelLut(lut, ch);
                 }
-                imp.setC(1);
             }
+            imp = ci;
         }
         return imp;
     }
@@ -181,6 +197,10 @@ public final class TensorOpener {
      */
     static void applyCalibration(Calibration cal, AxisMap map, List<Double> scales, List<String> units,
                                  long[] scaleHint) {
+        if (scaleHint.length != map.ndim) {
+            throw new IllegalArgumentException("scale hint has " + scaleHint.length + " entries but the tensor has "
+                    + map.ndim + " axes");
+        }
         double sx = scaleAt(scales, units, map.x, scaleHint), sy = scaleAt(scales, units, map.y, scaleHint);
         double sz = map.z >= 0 ? scaleAt(scales, units, map.z, scaleHint) : 0;
         double st = map.t >= 0 ? scaleAt(scales, units, map.t, scaleHint) : 0;

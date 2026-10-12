@@ -322,4 +322,14 @@ public class RoiLoaderTest {
         assertEquals(Integer.valueOf(2), res.skippedReasons.get("zero-size rectangle"));
         assertEquals(Integer.valueOf(2), res.skippedReasons.get("zero-size ellipse"));
     }
+
+    @Test
+    public void nullPlaneMapSkipsPinnedButLoadsUnpinned() throws Exception {
+        RoiListResult r = RoiListResult.newBuilder()
+                .addRois(ann("a", rect(1, 1, 5, 5)).build())
+                .addRois(ann("b", rect(1, 1, 5, 5)).putPlane(0, 1).build()).build();
+        RoiLoader.Result res = RoiLoader.load((a, s2) -> r, "arr", "s", stack(1, 1, 1), null, 1, 1);
+        assertEquals(1, res.loaded);
+        assertEquals(1, res.skipped);
+    }
 }

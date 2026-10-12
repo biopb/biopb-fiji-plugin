@@ -230,4 +230,50 @@ public class TensorVirtualStackTest {
         double[] r = TensorVirtualStack.sampleRange(new short[16], PlaneSource.Kind.GRAY16, 4, 4);
         assertEquals(65535, r[1], 0);
     }
+
+    @Test
+    public void heapBudgetCapsCacheAndRefuses() {
+        // 1000x1000 float32 = 4 MB/plane; budget = 60% of heap.
+        FakePlaneSource src = new FakePlaneSource(1000, 1000, 1, 8, 1, PlaneSource.Kind.GRAY32);
+        assertEquals(1, new TensorVirtualStack(src, 4, () -> 20L << 20).cacheSizeForTest()); // 12MB/4 - 2
+        assertEquals(4, new TensorVirtualStack(src, 4, () -> 200L << 20).cacheSizeForTest());
+        assertEquals(2, new TensorVirtualStack(src, 4, () -> 30L << 20).cacheSizeForTest()); // 18MB/4 - 2
+        try {
+            new TensorVirtualStack(src, 4, () -> 10L << 20); // 6MB budget < 3 planes
+            fail();
+        } catch (PlaneTooLargeException expected) { }
+    }
+
+    @Test
+    public void getProcessorDoesNoExtraIo() {
+        FakePlaneSource src = new FakePlaneSource(2, 1, 1);
+        TensorVirtualStack s = new TensorVirtualStack(src);
+        s.getProcessor(2);
+        assertEquals(1, src.reads.get());
+    }
+
+    @Test
+    public void compositeChannelRangesWithoutRender() {
+        PlaneSource src = new FakePlaneSource(2, 1, 1) {
+            @Override public Object readPlane(int t, int c, int z) {
+                short[] a = new short[w * h];
+                for (int i = 0; i < a.length; i++) a[i] = (short) (i % 2 == 0 ? 0 : 10 * (c + 1));
+                return a;
+            }
+        };
+        CompositeImage ci = (CompositeImage) TensorOpener.assemble(src, "x");
+        assertEquals(10, ci.getChannelLut(1).max, 0);
+        assertEquals(20, ci.getChannelLut(2).max, 0);
+        assertEquals(1, ci.getChannel());
+    }
+
+    @Test
+    public void singleChannelUserRangeSurvivesAndLaterChange() {
+        ImagePlus imp = TensorOpener.assemble(new FakePlaneSource(6, 4, 1, 4, 1, PlaneSource.Kind.GRAY16), "x");
+        imp.setDisplayRange(2, 3);
+        for (int z = 2; z <= 4; z++) imp.setSlice(z);
+        imp.setSlice(1);
+        assertEquals(2, imp.getDisplayRangeMin(), 0);
+        assertEquals(3, imp.getDisplayRangeMax(), 0);
+    }
 }
