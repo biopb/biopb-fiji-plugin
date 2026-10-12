@@ -3,28 +3,78 @@
 A Fiji / ImageJ2 plugin for browsing and opening tensors served by a
 [biopb](https://github.com/biopb/biopb) tensor server. It is the Fiji
 counterpart of [biopb-napari-widget](https://github.com/biopb/biopb-napari-widget)'s
-Tensor Browser.
-
-**Status:** scaffold. The menu entry (Plugins > BioPB > Tensor Browser) loads
-but does nothing yet.
+Tensor Browser. Tensors open as lazy (virtual) hyperstacks: planes are read from
+the server when you look at them.
 
 ## Requirements
 
-- **Fiji Latest** (bundles Java 21). Fiji Stable is Java 8 and cannot load the
-  biopb SDK (compiled for Java 11).
+- **Fiji Latest** (bundles Java 21). **Fiji Stable (Java 8) is not supported**:
+  the biopb SDK is compiled for Java 11.
 - A biopb tensor server. Lazy catalog browsing needs the server and SDK from
   biopb 0.13.0rc1 (`catalog_children`).
 
-## Build
+## Install
 
-    mvn verify
+- **Update site** (once published): in Fiji, *Help > Update... > Manage update
+  sites*, tick the BioPB site, apply the changes and restart Fiji.
+- **Manual**: build and install into a Fiji.app. This copies the plugin jar and
+  the dependencies Fiji lacks (Arrow, Flight, netty-tcnative, ...) into the
+  install:
 
-## Notes
+      mvn install -DskipTests -Dscijava.app.directory=/path/to/Fiji.app -Ddelete.other.versions=true
 
-Compatibility with Fiji's bundled jars was checked with a probe against Fiji
-Latest: the SDK runs against Fiji's own imglib2/protobuf/slf4j/guava/grpc, and
-needs the Arrow, Flight and netty-tcnative jars that Fiji does not ship.
-Fiji's launcher unlocks `java.nio` for Arrow, so no JVM flag is needed.
+  Restart Fiji. Fiji's launcher unlocks `java.nio` for Arrow, so no JVM flag is needed.
+
+## Usage
+
+1. *Plugins > BioPB > Tensor Browser* opens the browser window (running it again
+   brings the same window to the front; closing it closes the server connection).
+2. Enter the server as `host[:port]` (default `localhost:8815`, or the
+   `BIOPB_TENSOR_URL` environment variable) and press **Connect**.
+3. Browse the catalog (folders load as you expand them), or type in the search box
+   (searched on the server).
+4. **Double-click** a tensor to open it at full resolution. Right-click for "Open at coarser level…" (pick a pyramid level) at a
+   coarser pyramid level. If a single plane is too large (the default limit is 2^28
+   pixels, and ImageJ cannot hold more than 2^31-1 per array), you are offered the
+   nearest coarser level that fits.
+5. **Load ROIs** (right-click menu): annotations stored on the server for the tensor are
+   added to the overlay of the already-open image. Open the image first. The status
+   line reports how many loaded, how many were skipped and why, and whether the
+   server's per-tensor cap truncated the set.
+
+### Assumptions
+
+- ROI coordinates are treated as pixel-index space of level 0 and are divided by the
+  level's scale to match the image you opened. ROIs pinned to a plane via the
+  annotation's axis map are placed on that c/z/t plane; unpinned ones show on all planes.
+- Axes are recognised by label (t, c, z, y, x, s for a size-3 RGB sample axis), in the
+  descriptor's order; data is never transposed. A tensor with unlabeled axes is
+  assumed to end in (y, x). If more than two unlabeled axes are non-singleton (or a
+  label is unknown) a dialog asks for an **axis override**: one letter per axis from
+  `t c z y x s -` (`-` = ignored singleton), e.g. `tzyx`.
+- uint8, uint16 and float32 open natively; other numeric types are converted to
+  float32 plane by plane.
+
+## Development
+
+    xvfb-run -a mvn -B verify      # build and test (Swing tests need a display; xvfb on headless Linux)
+
+CI (`.github/workflows/ci.yml`) runs the build, plus a `fiji-smoke` job that installs the
+plugin into Fiji Latest and runs `.github/scripts/smoke.groovy` headless (command
+discovery, SDK class loading, an Arrow allocation).
+
+## Release
+
+Push a tag `vX.Y.Z`. The release workflow builds the jar with that version and attaches
+it to a GitHub Release. If the repository variable `UPDATE_SITE` is set, it also uploads
+to the Fiji update site; that job runs in the `fiji-update-site` environment, which needs
+
+- variables `UPDATE_SITE` (the site name registered at imagej.net) and `WIKI_USER`
+  (the wiki user owning the site), and
+- secret `IMAGEJ_PW` (that user's wiki password).
+
+See the header of `.github/workflows/release.yml` and
+<https://imagej.net/update-sites/automatic-uploads>.
 
 ## License
 

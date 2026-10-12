@@ -1,0 +1,32 @@
+// Headless smoke test run inside Fiji: ./Fiji.app/fiji-linux-x64 --headless --run smoke.groovy
+// Exits non-zero on any failure.
+#@ CommandService cs
+try {
+    // 1. the command is discovered with its menu path
+    def info = cs.getCommand("io.github.jiyuuchc.biopb.fiji.TensorBrowserCommand")
+    if (info == null) throw new RuntimeException("TensorBrowserCommand not discovered by CommandService")
+    def path = info.getMenuPath().getMenuString().replaceAll("\\s*>\\s*", ">")
+    if (path != "Plugins>BioPB>Tensor Browser") throw new RuntimeException("unexpected menu path: " + path)
+    println("OK command: " + path)
+
+    // 2. the SDK class loads (its dependencies resolve)
+    Class.forName("biopb.tensor.TensorFlightClient")
+    println("OK TensorFlightClient loads")
+
+    // 3. Arrow memory works: needs java.nio opened by Fiji's launcher
+    def alloc = new org.apache.arrow.memory.RootAllocator(Long.MAX_VALUE)
+    try {
+        def buf = alloc.buffer(64)
+        buf.setLong(0, 42L)
+        if (buf.getLong(0) != 42L) throw new RuntimeException("ArrowBuf round trip failed")
+        buf.close()
+    } finally {
+        alloc.close()
+    }
+    println("OK Arrow allocation")
+} catch (Throwable t) {
+    t.printStackTrace()
+    System.err.println("SMOKE FAILED: " + t)
+    System.exit(1)
+}
+System.exit(0)
