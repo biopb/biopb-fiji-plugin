@@ -34,6 +34,10 @@ import java.util.logging.Logger;
  * a reader on the UI thread sees the whole old state or the whole new one. The
  * {@linkplain #setOnChanged change listener} is called on the watcher thread;
  * a Swing UI must marshal to the EDT (e.g. {@code SwingUtilities.invokeLater}).
+ *
+ * <p>Known limitation (as in the napari widget): sources removed from the server
+ * are not pruned from {@link #getSources()} in lazy mode; descriptors accumulate
+ * until {@link #clear()}.
  */
 public final class SourceList implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(SourceList.class.getName());
@@ -69,9 +73,11 @@ public final class SourceList implements AutoCloseable {
     private volatile Supplier<? extends Collection<String>> openKeys = Collections::emptySet;
     private volatile Consumer<Map<String, Map<String, Object>>> onChanged;
 
-    // Watcher state: what the list was last reconciled against. Touched only by poll().
+    // Watcher state: what the list was last reconciled against. Guarded by lock and
+    // reset by clear(); a poll that began before a clear() does not write it.
     private Long lastCount;
     private Object lastGeneration;
+    private long lastPending;
 
     /** A list over one fixed client, polling every {@link #WATCH_INTERVAL_S} seconds. */
     public SourceList(CatalogClient client) {
@@ -144,9 +150,10 @@ public final class SourceList implements AutoCloseable {
             levels = Collections.emptyMap();
             lazy = false;
             lazyUnsupported = false;
+            lastCount = null;
+            lastGeneration = null;
+            lastPending = 0;
         }
-        lastCount = null;
-        lastGeneration = null;
     }
 
     // --- listing -------------------------------------------------------------
@@ -160,14 +167,17 @@ public final class SourceList implements AutoCloseable {
      */
     public Map<String, Map<String, Object>> refresh() throws IOException {
         CatalogClient client = client();
+        int startEpoch;
         boolean tryLevels;
+        Map<String, CatalogClient.Level> before;
         synchronized (lock) {
+            startEpoch = epoch;
             tryLevels = !lazyUnsupported;
+            before = levels;
         }
-        if (tryLevels && refreshLevels(client)) {
+        if (tryLevels && refreshLevels(client, startEpoch, before)) {
             return sources;
         }
-        int startEpoch = currentEpoch();
         Map<String, Map<String, Object>> listed = indexById(client.query(sourcesSql(sourceColumns(client))));
         synchronized (lock) {
             checkCurrent(client, startEpoch);
@@ -179,13 +189,8 @@ public final class SourceList implements AutoCloseable {
     }
 
     /** Reads the levels; false when the server (or SDK) cannot serve them. */
-    private boolean refreshLevels(CatalogClient client) throws IOException {
-        int startEpoch;
-        Map<String, CatalogClient.Level> before;
-        synchronized (lock) {
-            startEpoch = epoch;
-            before = levels;
-        }
+    private boolean refreshLevels(CatalogClient client, int startEpoch,
+            Map<String, CatalogClient.Level> before) throws IOException {
         CatalogClient.Level top;
         try {
             top = client.catalogChildren("", LEVEL_LIMIT);
@@ -194,6 +199,7 @@ public final class SourceList implements AutoCloseable {
         }
         if (top == null) {
             synchronized (lock) {
+                checkCurrent(client, startEpoch);
                 lazyUnsupported = true;
             }
             return false;
@@ -234,7 +240,9 @@ public final class SourceList implements AutoCloseable {
         List<String> ids = new ArrayList<>();
         for (CatalogClient.Level level : fresh.values()) {
             for (CatalogClient.Source s : level.getSources()) {
-                ids.add(s.getSourceId());
+                if (s.getSourceId() != null) {
+                    ids.add(s.getSourceId());
+                }
             }
         }
         Map<String, Map<String, Object>> described = describe(ids, client);
@@ -246,7 +254,12 @@ public final class SourceList implements AutoCloseable {
                     merged.put(e.getKey(), e.getValue());
                 }
             }
-            merged.putAll(fresh);
+            for (Map.Entry<String, CatalogClient.Level> e : fresh.entrySet()) {
+                // A folder committed since the re-list began is newer than the re-list's read.
+                CatalogClient.Level now = levels.get(e.getKey());
+                boolean newer = before != null && now != null && now != before.get(e.getKey());
+                merged.put(e.getKey(), newer ? now : e.getValue());
+            }
             Map<String, Map<String, Object>> all = new HashMap<>(sources);
             all.putAll(described);
             sources = Collections.unmodifiableMap(all);
@@ -396,17 +409,22 @@ public final class SourceList implements AutoCloseable {
     }
 
     /**
-     * One watcher tick: ask the server how it is and re-list if the count or the
-     * catalog generation moved. The first connected poll compares against what was
-     * listed at connect, so a listing taken mid-index is caught. Package-private
-     * so tests can drive it without a clock.
+     * One watcher tick: ask the server how it is and re-list if the count, the
+     * catalog generation or the pending-registration figure moved. The first
+     * connected poll compares against what was listed at connect, so a listing
+     * taken mid-index is caught. The baseline advances only after a successful
+     * re-list, so a failed one is retried on the next tick. Package-private so
+     * tests can drive it without a clock.
      */
     void poll() {
         CatalogClient client = connection.get();
         if (client == null) {
-            lastCount = null; // disconnected: next connected poll starts a baseline
+            synchronized (lock) {
+                lastCount = null; // disconnected: next connected poll starts a baseline
+            }
             return;
         }
+        int startEpoch = currentEpoch();
         Map<String, Object> health;
         try {
             health = client.healthCheck();
@@ -418,28 +436,54 @@ public final class SourceList implements AutoCloseable {
         if (!(raw instanceof Number)) {
             return;
         }
-        long count = ((Number) raw).longValue();
+        Number count = (Number) raw;
         Object generation = health.get("catalog_generation");
-        if (lastCount == null) {
-            // A lazy listing holds a few levels, not the catalog: what it was
-            // listed against is what the server said at the first poll.
-            lastCount = lazy ? count : (long) sources.size();
-            lastGeneration = generation;
+        Object pendingRaw = health.get("registration_pending");
+        long pending = pendingRaw instanceof Number ? ((Number) pendingRaw).longValue() : 0;
+        boolean changed;
+        synchronized (lock) {
+            if (startEpoch != epoch) {
+                return; // cleared while we asked; the answer belongs to the old listing
+            }
+            if (lastCount == null) {
+                // A lazy listing holds a few levels, not the catalog: what it was
+                // listed against is what the server said at the first poll.
+                lastCount = lazy ? count.longValue() : (long) sources.size();
+                lastGeneration = generation;
+            }
+            changed = !sameNumber(count, lastCount) || pending != lastPending
+                    || !sameValue(generation, lastGeneration);
         }
-        if (count != lastCount || !Objects.equals(generation, lastGeneration)) {
-            relist();
-            lastCount = count;
-            lastGeneration = generation;
+        if (changed && relist()) {
+            synchronized (lock) {
+                if (startEpoch == epoch) {
+                    lastCount = count.longValue();
+                    lastGeneration = generation;
+                    lastPending = pending;
+                }
+            }
         }
     }
 
-    private void relist() {
+    private static boolean sameNumber(Number a, Number b) {
+        return a.doubleValue() == b.doubleValue();
+    }
+
+    private static boolean sameValue(Object a, Object b) {
+        if (a instanceof Number && b instanceof Number) {
+            return sameNumber((Number) a, (Number) b);
+        }
+        return Objects.equals(a, b);
+    }
+
+    /** Re-lists and tells the listener; false when the re-list failed. */
+    private boolean relist() {
         Map<String, Map<String, Object>> listed;
         try {
             listed = refresh();
         } catch (IOException | RuntimeException e) { // keep watching through a blip
             LOG.log(Level.WARNING, "Source watch: re-list failed", e);
-            return;
+            return false;
         }
         LOG.info("Source watch: re-listed " + listed.size() + " sources");
         Consumer<Map<String, Map<String, Object>>> callback = onChanged;
@@ -450,5 +494,6 @@ public final class SourceList implements AutoCloseable {
                 LOG.log(Level.WARNING, "Source watch: change listener failed", e);
             }
         }
+        return true;
     }
 }

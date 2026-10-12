@@ -33,11 +33,12 @@ public class SourceListTest {
         List<String> catalog = new ArrayList<>();
         Map<String, Level> levels; // null: an old server without catalog_children
         BiFunction<String, Integer, Level> childrenHook; // overrides levels when set
-        final Deque<Object> health = new ArrayDeque<>(); // Map or RuntimeException
+        final Deque<Object> health = new java.util.concurrent.ConcurrentLinkedDeque<>(); // Map or RuntimeException
         String columns; // sourceRowColumns answer
         final List<String> queries = new ArrayList<>();
         final List<String> childKeys = new ArrayList<>();
-        int healthCalls;
+        final java.util.concurrent.atomic.AtomicInteger healthCalls = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable healthHook; // runs inside healthCheck, to interleave a call
 
         @Override
         public Level catalogChildren(String key, int limit) {
@@ -68,7 +69,10 @@ public class SourceListTest {
         @Override
         @SuppressWarnings("unchecked")
         public Map<String, Object> healthCheck() throws IOException {
-            healthCalls++;
+            healthCalls.incrementAndGet();
+            if (healthHook != null) {
+                healthHook.run();
+            }
             Object next = health.poll();
             if (next instanceof RuntimeException) {
                 throw (RuntimeException) next;
@@ -465,21 +469,40 @@ public class SourceListTest {
         list.refresh();
         current[0] = null;
         list.poll();
-        assertEquals(0, client.healthCalls);
+        assertEquals(0, client.healthCalls.get());
     }
 
     @Test
-    public void aFailedReListKeepsTheWatcherAlive() throws Exception {
+    public void aFailedReListIsRetriedOnTheNextPoll() throws Exception {
         FakeClient client = new FakeClient();
         SourceList list = listing(client, "a");
         client.health.add(h(2));
-        client.health.add(h(3));
-        client.childrenHook = null;
-        client.catalog = null; // the listing query now fails with a NullPointerException
+        client.health.add(h(2));
+        client.catalog = null; // the listing query now fails
         list.poll();
-        list.poll();
-        assertEquals(2, client.healthCalls);
         assertEquals(set("a"), list.getSources().keySet());
+        client.catalog = l("a", "b");
+        list.poll(); // same health answer, but the baseline did not advance
+        assertEquals(set("a", "b"), list.getSources().keySet());
+        assertEquals(2, client.healthCalls.get());
+    }
+
+    @Test
+    public void aChangeInRegistrationPendingRelists() throws Exception {
+        FakeClient client = new FakeClient();
+        SourceList list = listing(client, "a");
+        Map<String, Object> p2 = h(1);
+        p2.put("registration_pending", 2);
+        Map<String, Object> p1 = h(1);
+        p1.put("registration_pending", 1);
+        client.health.add(p2);
+        client.health.add(p2);
+        client.health.add(p1);
+        client.health.add(h(1));
+        for (int i = 0; i < 4; i++) {
+            list.poll();
+        }
+        assertEquals(3, client.listings()); // on 2, on 1, on 0; none between
     }
 
     @Test
@@ -513,14 +536,31 @@ public class SourceListTest {
     @Test
     public void clearRestartsTheWatcherBaseline() throws Exception {
         FakeClient client = new FakeClient();
-        SourceList list = listing(client, "a");
+        SourceList list = listing(client, "a"); // baseline would be 1
         client.health.add(h(1));
         list.poll();
         list.clear();
+        client.catalog = l("a", "b", "c");
+        list.refresh(); // 3 sources now
+        client.queries.clear();
+        client.health.add(h(3));
+        list.poll(); // a stale baseline of 1 would re-list here
+        assertEquals(0, client.listings());
+    }
+
+    @Test
+    public void aPollRunningDuringAClearDoesNotRestoreTheBaseline() throws Exception {
+        FakeClient client = new FakeClient();
+        SourceList list = listing(client, "a");
+        client.health.add(h(1));
+        client.healthHook = list::clear; // the clear lands while the poll asks
+        list.poll();
+        client.healthHook = null;
+        client.catalog = l("a", "b", "c");
         list.refresh();
         client.queries.clear();
-        client.health.add(h(1));
-        list.poll(); // baseline against the new listing: no re-list
+        client.health.add(h(3));
+        list.poll(); // baseline from the new listing, not the interrupted poll's
         assertEquals(0, client.listings());
     }
 
@@ -541,17 +581,114 @@ public class SourceListTest {
     public void theScheduledWatcherPollsAndStops() throws Exception {
         FakeClient client = new FakeClient();
         client.catalog = l("a");
-        CountDownLatch changed = new CountDownLatch(1);
-        try (SourceList list = new SourceList(() -> client, 10, null)) {
+        java.util.concurrent.ScheduledExecutorService exec =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        try {
+            SourceList list = new SourceList(() -> client, 5, exec);
             list.refresh();
             client.health.add(h(2));
             client.catalog = l("a", "b");
+            CountDownLatch changed = new CountDownLatch(1);
             list.setOnChanged(m -> changed.countDown());
             list.startWatch();
             list.startWatch(); // idempotent
             assertTrue(changed.await(5, TimeUnit.SECONDS));
             assertEquals(set("a", "b"), list.getSources().keySet());
+
+            list.close();
+            assertFalse(exec.isShutdown()); // an injected executor is the caller's
+            exec.submit(() -> { }).get(); // any in-flight poll has finished
+            int calls = client.healthCalls.get();
+            Thread.sleep(60);
+            assertEquals(calls, client.healthCalls.get());
+        } finally {
+            exec.shutdownNow();
         }
+    }
+
+    // --- more states -----------------------------------------------------------
+
+    @Test
+    public void clearLetsTheNextRefreshTryLevelsAgain() throws Exception {
+        FakeClient client = new FakeClient();
+        client.catalog = l("a");
+        SourceList list = new SourceList(client);
+        list.refresh(); // old server: latched as unsupported
+        assertFalse(list.isLazy());
+        client.levels = levels("", level(l(), l("a")));
+        list.refresh();
+        assertFalse(list.isLazy()); // still latched
+        list.clear();
+        list.refresh();
+        assertTrue(list.isLazy());
+    }
+
+    @Test
+    public void aWholeListingReadBegunBeforeAClearIsDropped() throws Exception {
+        FakeClient client = new FakeClient();
+        client.catalog = l("a");
+        SourceList list = new SourceList(client);
+        client.healthHook = null;
+        client.childrenHook = (k, n) -> {
+            list.clear(); // lands after the epoch was taken, before the listing commits
+            throw new UnsupportedOperationException("old");
+        };
+        try {
+            list.refresh();
+            fail("should have been dropped");
+        } catch (IllegalStateException expected) {
+            // stale epoch
+        }
+        assertTrue(list.getSources().isEmpty());
+    }
+
+    @Test
+    public void aMalformedLevelIsRejected() throws Exception {
+        try {
+            new CatalogClient.Level("", null, l().isEmpty() ? new ArrayList<>() : null, false);
+            fail("a level without its lists is malformed");
+        } catch (NullPointerException expected) {
+            // rejected
+        }
+        FakeClient client = new FakeClient();
+        client.levels = levels("", level(l("a"), l()), "a", null); // the server's answer for "a" is unusable
+        SourceList list = new SourceList(client);
+        list.refresh();
+        try {
+            list.loadLevel("a");
+            fail("should have thrown");
+        } catch (IOException expected) {
+            // not kept
+        }
+        assertFalse(list.getLevels().containsKey("a"));
+    }
+
+    @Test
+    public void aNewerFolderReadIsNotOverwrittenByAnOlderReList() throws Exception {
+        CatalogClient.Level old = level(l(), l("x"));
+        CatalogClient.Level newer = level(l(), l("x", "y"));
+        Map<String, CatalogClient.Level> served = levels("", level(l("a"), l()), "a", old);
+        FakeClient client = new FakeClient();
+        SourceList list = lazyListing(client, served);
+        list.refresh();
+        list.loadLevel("a");
+        list.setOpenKeys(() -> set("a"));
+        boolean[] done = {false};
+        client.childrenHook = (key, limit) -> {
+            CatalogClient.Level answer = served.get(key);
+            if (key.equals("a") && !done[0]) {
+                done[0] = true; // the re-list has read the old "a"; a newer read lands before it commits
+                served.put("a", newer);
+                try {
+                    list.loadLevel("a");
+                } catch (IOException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+            return answer;
+        };
+        list.refresh();
+        assertSame(newer, list.getLevels().get("a"));
     }
 
     @Test

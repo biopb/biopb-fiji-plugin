@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * The few calls {@link SourceList} makes of a tensor server, with plain Java
@@ -28,8 +29,9 @@ public interface CatalogClient {
          */
         public Level(String key, List<Folder> folders, List<Source> sources, boolean truncated) {
             this.key = key;
-            this.folders = Collections.unmodifiableList(new ArrayList<>(folders));
-            this.sources = Collections.unmodifiableList(new ArrayList<>(sources));
+            // A level without its lists is malformed (the Python's _valid_level).
+            this.folders = Collections.unmodifiableList(new ArrayList<>(Objects.requireNonNull(folders, "folders")));
+            this.sources = Collections.unmodifiableList(new ArrayList<>(Objects.requireNonNull(sources, "sources")));
             this.truncated = truncated;
         }
 
@@ -68,6 +70,7 @@ public interface CatalogClient {
     /**
      * Reads one level of the catalog tree.
      *
+     * @return the level, or {@code null} if the answer is malformed
      * @throws UnsupportedOperationException if the server (or SDK) predates the call
      * @throws IOException if the call fails
      */

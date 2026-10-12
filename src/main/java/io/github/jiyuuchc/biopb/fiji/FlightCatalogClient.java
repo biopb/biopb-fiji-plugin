@@ -4,9 +4,12 @@ import biopb.tensor.TensorFlightClient;
 import biopb.tensor.TensorFlightClient.CatalogChildren;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.arrow.flight.FlightRuntimeException;
+import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.util.Text;
@@ -22,16 +25,46 @@ public final class FlightCatalogClient implements CatalogClient {
 
     @Override
     public Level catalogChildren(String key, int limit) throws IOException {
-        CatalogChildren c = client.catalogChildren(key, limit);
-        List<Folder> folders = new ArrayList<>();
-        for (CatalogChildren.Folder f : c.getFolders()) {
-            folders.add(new Folder(f.getName(), f.getKey()));
+        CatalogChildren c;
+        try {
+            c = client.catalogChildren(key, limit);
+        } catch (RuntimeException e) {
+            throw oldServer(e);
         }
-        List<Source> sources = new ArrayList<>();
-        for (CatalogChildren.Source s : c.getSources()) {
-            sources.add(new Source(s.getName(), s.getSourceId()));
+        try {
+            List<Folder> folders = new ArrayList<>();
+            for (CatalogChildren.Folder f : c.getFolders()) {
+                folders.add(new Folder(f.getName(), f.getKey()));
+            }
+            List<Source> sources = new ArrayList<>();
+            for (CatalogChildren.Source s : c.getSources()) {
+                sources.add(new Source(s.getName(), s.getSourceId()));
+            }
+            return new Level(c.getKey(), folders, sources, c.isTruncated());
+        } catch (NullPointerException malformed) { // the server's JSON left a list out
+            return null;
         }
-        return new Level(c.getKey(), folders, sources, c.isTruncated());
+    }
+
+    /**
+     * The exception {@link SourceList} reads as "no catalog_children here". The SDK
+     * already turns a server's "Unknown action" into {@code UnsupportedOperationException};
+     * a raw Flight UNIMPLEMENTED or "Unknown action catalog_children" error that
+     * reaches us is translated too. Anything else passes through unchanged.
+     */
+    static RuntimeException oldServer(RuntimeException e) {
+        if (e instanceof UnsupportedOperationException) {
+            return e;
+        }
+        if (e instanceof FlightRuntimeException) {
+            FlightRuntimeException f = (FlightRuntimeException) e;
+            String message = String.valueOf(f.getMessage());
+            if (f.status().code() == FlightStatusCode.UNIMPLEMENTED
+                    || message.contains("Unknown action") && message.contains("catalog_children")) {
+                return new UnsupportedOperationException("catalog_children is unavailable on this server", e);
+            }
+        }
+        return e;
     }
 
     @Override
@@ -41,13 +74,34 @@ public final class FlightCatalogClient implements CatalogClient {
             for (int i = 0; i < root.getRowCount(); i++) {
                 Map<String, Object> row = new LinkedHashMap<>();
                 for (FieldVector v : root.getFieldVectors()) {
-                    Object value = v.getObject(i);
-                    row.put(v.getName(), value instanceof Text ? value.toString() : value);
+                    row.put(v.getName(), plain(v.getObject(i)));
                 }
                 rows.add(row);
             }
             return rows;
         }
+    }
+
+    /** An immutable plain-Java copy of an Arrow value: {@code Text} as {@code String}, lists and structs copied. */
+    static Object plain(Object value) {
+        if (value instanceof Text) {
+            return value.toString();
+        }
+        if (value instanceof List) {
+            List<Object> copy = new ArrayList<>();
+            for (Object o : (List<?>) value) {
+                copy.add(plain(o));
+            }
+            return Collections.unmodifiableList(copy);
+        }
+        if (value instanceof Map) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+                copy.put(String.valueOf(e.getKey()), plain(e.getValue()));
+            }
+            return Collections.unmodifiableMap(copy);
+        }
+        return value;
     }
 
     @Override
