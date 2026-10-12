@@ -243,6 +243,8 @@ public class RoiLoaderTest {
         RoiLoader.Result res = load(imp, 1, 1, false, ann("a", rect(0, 0, 3, 3)).build());
         try {
             assertEquals(1, res.applyTo(imp, true));
+            assertNull(imp.getOverlay()); // manager instead of overlay
+            assertEquals(0, res.applyTo(imp, true)); // deduped against the manager
             RoiManager inst = RoiManager.getInstance2();
             assertNotNull(inst);
             assertTrue(inst.getCount() >= 1);
@@ -253,5 +255,71 @@ public class RoiLoaderTest {
                 inst.close();
             }
         }
+    }
+
+    @Test
+    public void plainStacksAnyAxis() throws Exception {
+        ImagePlus imp = IJ.createImage("x", "8-bit", 64, 64, 5);
+        PlaneMap t = PlaneMap.fromDimLabels(Arrays.asList("t", "y", "x"));
+        PlaneMap c = PlaneMap.fromDimLabels(Arrays.asList("c", "y", "x"));
+        RoiListResult r = RoiListResult.newBuilder()
+                .addRois(ann("a", rect(1, 1, 5, 5)).putPlane(0, 3))
+                .addRois(ann("b", rect(1, 1, 5, 5)).putPlane(0, 5)).build();
+        for (PlaneMap pm : new PlaneMap[] {t, c, TCZ}) {
+            RoiLoader.Result res = RoiLoader.load((a, s2) -> r, "arr", "s", imp, pm, 1, 1);
+            assertEquals(1, res.loaded);
+            assertEquals(4, res.rois.get(0).getPosition());
+            assertEquals(Integer.valueOf(1), res.skippedReasons.get("plane outside image"));
+        }
+        // z stack: axis 2 in TCZ
+        RoiLoader.Result z = load(imp, 1, 1, false, ann("z", rect(1, 1, 5, 5)).putPlane(2, 1).build());
+        assertEquals(2, z.rois.get(0).getPosition());
+        // zero pin on another axis is fine; two axes > 0 conflict
+        RoiLoader.Result mix = load(imp, 1, 1, false,
+                ann("m", rect(1, 1, 5, 5)).putPlane(0, 0).putPlane(2, 2).build(),
+                ann("n", rect(1, 1, 5, 5)).putPlane(0, 1).putPlane(2, 2).build());
+        assertEquals(1, mix.loaded);
+        assertEquals(3, mix.rois.get(0).getPosition());
+        assertEquals(Integer.valueOf(1), mix.skippedReasons.get("conflicting pins on a plain stack"));
+    }
+
+    @Test
+    public void downsampledAxisScale() throws Exception {
+        ImagePlus imp = stack(1, 4, 1); // z downsampled 2x from 8 planes
+        RoiListResult r = RoiListResult.newBuilder()
+                .addRois(ann("a", rect(1, 1, 5, 5)).putPlane(2, 5))
+                .addRois(ann("b", rect(1, 1, 5, 5)).putPlane(2, 8)).build();
+        double[] sc = {1, 1, 2, 1, 1};
+        RoiLoader.Result res = RoiLoader.load((a, s) -> r, "arr", "s", imp, TCZ, sc, 1, 1);
+        assertEquals(1, res.loaded);
+        assertEquals(3, res.rois.get(0).getZPosition()); // floor(5/2)=2 -> plane 3
+        assertEquals(1, res.skipped);
+    }
+
+    @Test
+    public void emptyIdNotDeduped() throws Exception {
+        ImagePlus imp = stack(1, 1, 1);
+        RoiLoader.Result res = load(imp, 1, 1, false, ann("", rect(0, 0, 3, 3)).build(),
+                ann("", rect(0, 0, 4, 4)).build());
+        assertEquals(2, res.applyTo(imp, false));
+        assertEquals(2, res.applyTo(imp, false));
+        assertEquals(4, imp.getOverlay().size());
+        // array_id is part of the key
+        RoiLoader.Result a = load(imp, 1, 1, false, ann("q", rect(0, 0, 3, 3)).build());
+        RoiLoader.Result b = load(imp, 1, 1, false,
+                ann("q", rect(0, 0, 3, 3)).setArrayId("other").build());
+        assertEquals(1, a.applyTo(imp, false));
+        assertEquals(1, b.applyTo(imp, false));
+        assertEquals(0, a.applyTo(imp, false));
+    }
+
+    @Test
+    public void zeroSizeSkipped() throws Exception {
+        RoiLoader.Result res = load(stack(1, 1, 1), 1, 1, false,
+                ann("a", rect(0, 0, 0, 5)).build(), ann("b", rect(0, 0, 5, 0)).build(),
+                ann("c", ell(5, 5, 0, 2, 0)).build(), ann("d", ell(5, 5, 2, 0, 0)).build());
+        assertEquals(0, res.loaded);
+        assertEquals(Integer.valueOf(2), res.skippedReasons.get("zero-size rectangle"));
+        assertEquals(Integer.valueOf(2), res.skippedReasons.get("zero-size ellipse"));
     }
 }

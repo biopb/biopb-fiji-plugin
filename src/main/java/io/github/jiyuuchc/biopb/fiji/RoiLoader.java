@@ -4,6 +4,7 @@ import biopb.image.RoiAnnotation;
 import biopb.image.RoiListResult;
 import biopb.tensor.TensorFlightClient;
 import ij.ImagePlus;
+import ij.WindowManager;
 import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.plugin.frame.RoiManager;
@@ -47,47 +48,75 @@ public final class RoiLoader {
             this.truncated = truncated;
         }
 
+        /** Dedupe key (array, set, id); null for a Roi without an id, which is never deduped. */
         private static String key(Roi r) {
             String id = r.getProperty(RoiConverter.PROP_ROI_ID);
-            return id == null ? null : id + "\0" + r.getProperty(RoiConverter.PROP_SET_NAME);
+            if (id == null || id.isEmpty()) {
+                return null;
+            }
+            return r.getProperty(RoiConverter.PROP_ARRAY_ID) + "\0"
+                    + r.getProperty(RoiConverter.PROP_SET_NAME) + "\0" + id;
         }
 
         /**
-         * Add the ROIs to {@code imp}'s overlay (existing ROIs kept), skipping any whose
-         * ({@code biopb.roi_id}, {@code biopb.set_name}) is already in the overlay. Also adds
-         * them to the ROI Manager when requested and not headless. <b>EDT only.</b>
+         * Show the ROIs: in the image's overlay (existing ROIs kept) or, when {@code
+         * useRoiManager} is true and the JVM is not headless, in the ROI Manager <i>instead</i>
+         * of the overlay (headless: falls back to the overlay). ROIs with an id are skipped when
+         * the same (array_id, set_name, roi_id) is already in the overlay / manager. For the
+         * manager, {@code imp} is made the temporary current image while adding, so call this
+         * on the EDT with nothing else changing the current image. <b>EDT only.</b>
          *
-         * @return the number of ROIs added
+         * @return the number of ROIs actually added
          */
         public int applyTo(ImagePlus imp, boolean useRoiManager) {
-            Overlay ov = imp.getOverlay() != null ? imp.getOverlay() : new Overlay();
+            boolean mgr = useRoiManager && !GraphicsEnvironment.isHeadless();
+            Overlay ov = null;
+            RoiManager rm = null;
             Set<String> have = new HashSet<>();
-            for (Roi r : ov.toArray()) {
-                String k = key(r);
-                if (k != null) {
-                    have.add(k);
+            if (mgr) {
+                rm = RoiManager.getInstance2() != null ? RoiManager.getInstance2() : new RoiManager();
+                for (Roi r : rm.getRoisAsArray()) {
+                    String k = key(r);
+                    if (k != null) {
+                        have.add(k);
+                    }
+                }
+            } else {
+                ov = imp.getOverlay() != null ? imp.getOverlay() : new Overlay();
+                for (Roi r : ov.toArray()) {
+                    String k = key(r);
+                    if (k != null) {
+                        have.add(k);
+                    }
                 }
             }
-            List<Roi> added = new ArrayList<>();
-            for (Roi r : rois) {
-                String k = key(r);
-                if (k == null || have.add(k)) {
-                    ov.add((Roi) r.clone());
-                    added.add(r);
+            int n = 0;
+            ImagePlus prev = WindowManager.getCurrentImage();
+            try {
+                if (mgr) {
+                    WindowManager.setTempCurrentImage(imp);
+                }
+                for (Roi r : rois) {
+                    String k = key(r);
+                    if (k != null && !have.add(k)) {
+                        continue;
+                    }
+                    if (mgr) {
+                        rm.addRoi((Roi) r.clone());
+                    } else {
+                        ov.add((Roi) r.clone());
+                    }
+                    n++;
+                }
+            } finally {
+                if (mgr) {
+                    WindowManager.setTempCurrentImage(prev);
                 }
             }
-            if (added.isEmpty()) {
-                return 0;
+            if (!mgr && n > 0) {
+                imp.setOverlay(ov);
             }
-            imp.setOverlay(ov);
-            if (useRoiManager && !GraphicsEnvironment.isHeadless()) {
-                RoiManager rm = RoiManager.getInstance2() != null ? RoiManager.getInstance2()
-                        : new RoiManager();
-                for (Roi r : added) {
-                    rm.addRoi((Roi) r.clone());
-                }
-            }
-            return added.size();
+            return n;
         }
     }
 
@@ -110,6 +139,16 @@ public final class RoiLoader {
      */
     public static Result load(RoiSource source, String arrayId, String setName, ImagePlus imp,
             PlaneMap planes, double sx, double sy) throws IOException {
+        return load(source, arrayId, setName, imp, planes, null, sx, sy);
+    }
+
+    /**
+     * As above with a per-axis level scale ({@code axisScale[a]} for tensor axis {@code a},
+     * aligned with dim_labels, null = 1) for pyramid levels that also downsample z/t/c: a
+     * level-0 pin index {@code i} maps to {@code floor(i / scale)}.
+     */
+    public static Result load(RoiSource source, String arrayId, String setName, ImagePlus imp,
+            PlaneMap planes, double[] axisScale, double sx, double sy) throws IOException {
         RoiListResult res = source.list(arrayId, setName);
         List<Roi> rois = new ArrayList<>();
         Map<String, Integer> reasons = new TreeMap<>();
@@ -117,8 +156,7 @@ public final class RoiLoader {
         for (RoiAnnotation a : res.getRoisList()) {
             try {
                 Roi r = RoiConverter.toRoi(a, sx, sy);
-                PlaneMap.place(r, planes.position(a.getPlaneMap(), imp.getNChannels(),
-                        imp.getNSlices(), imp.getNFrames()), imp);
+                planes.place(r, a.getPlaneMap(), imp, axisScale);
                 rois.add(r);
             } catch (RoiConverter.SkipException e) {
                 skipped++;

@@ -18,6 +18,8 @@ import java.util.Locale;
  * continuous coordinates put the centre of pixel {@code i} at {@code i+0.5}. At a pyramid level
  * with scale factors (sx, sy) (level pixel {@code i} covers original indices
  * {@code [i*s, (i+1)*s)}), every coordinate maps to {@code (x + 0.5) / sx}, {@code (y + 0.5) / sy}.
+ * Rectangle corners are treated as continuous corner points (the proto does not say whether the
+ * bottom-right is inclusive); a rectangle with zero width or height is skipped.
  * This is applied to all vertices, corners and centres; radii and widths scale by the factor alone.
  *
  * <p>Supported arms: rectangle, ellipse, polygon (&ge;3 points), polyline (&ge;2 points) and
@@ -79,6 +81,9 @@ public final class RoiConverter {
             case RECTANGLE: {
                 Point a = g.getRectangle().getTopLeft(), b = g.getRectangle().getBottomRight();
                 check(ok(a) && ok(b), "rectangle");
+                if (a.getX() == b.getX() || a.getY() == b.getY()) {
+                    throw new SkipException("zero-size rectangle");
+                }
                 double x0 = (Math.min(a.getX(), b.getX()) + 0.5) / sx;
                 double x1 = (Math.max(a.getX(), b.getX()) + 0.5) / sx;
                 double y0 = (Math.min(a.getY(), b.getY()) + 0.5) / sy;
@@ -121,6 +126,9 @@ public final class RoiConverter {
         double cx = e.getCenter().getX(), cy = e.getCenter().getY(), rot = e.getRotation();
         check(ok(e.getCenter()) && rx >= 0 && ry >= 0 && !bad(rx) && !bad(ry) && !bad(rot),
                 "ellipse");
+        if (rx == 0 || ry == 0) {
+            throw new SkipException("zero-size ellipse");
+        }
         // Rotation is from +x toward +y (y down), about the centre, in index space.
         double cos = Math.cos(rot), sin = Math.sin(rot);
         if (sx == sy) {

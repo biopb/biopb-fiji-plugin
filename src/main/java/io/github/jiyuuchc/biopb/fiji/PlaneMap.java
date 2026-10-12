@@ -61,39 +61,67 @@ public final class PlaneMap {
         return new PlaneMap(m);
     }
 
-    /**
-     * The {@code [c, z, t]} position (1-based, 0 = all) for a pin against the image's sizes.
-     *
-     * @throws RoiConverter.SkipException when a pin is on an unmapped axis or outside the image
-     */
-    public int[] position(Map<Integer, Integer> plane, int nC, int nZ, int nT) {
-        int[] pos = new int[3];
-        int[] size = {nC, nZ, nT};
+    private int[] pins(Map<Integer, Integer> plane, double[] axisScale) {
+        int[] idx = {-1, -1, -1}; // per Dim; -1 = unpinned
         for (Map.Entry<Integer, Integer> e : plane.entrySet()) {
             Dim d = axes.get(e.getKey());
             if (d == null) {
                 throw new RoiConverter.SkipException("pinned axis is not t/c/z");
             }
-            int idx = e.getValue();
-            if (idx < 0 || idx >= size[d.ordinal()]) {
+            double sc = axisScale != null && e.getKey() < axisScale.length ? axisScale[e.getKey()] : 1;
+            if (e.getValue() < 0) {
                 throw new RoiConverter.SkipException("plane outside image");
             }
-            pos[d.ordinal()] = idx + 1;
+            idx[d.ordinal()] = (int) Math.floor(e.getValue() / sc);
         }
-        return pos;
+        return idx;
     }
 
-    /** Apply a {@link #position} result to a Roi, as a hyperstack c/z/t or a stack index. */
-    static void place(ij.gui.Roi roi, int[] pos, ImagePlus imp) {
-        if (pos[0] == 0 && pos[1] == 0 && pos[2] == 0) {
+    /**
+     * Set a Roi's position from its pin. {@code axisScale} (aligned with the tensor's
+     * dim_labels, null = all 1) is the pyramid level's downsampling per axis: a level-0 pin index
+     * {@code i} becomes {@code floor(i / scale)}.
+     *
+     * <p>Hyperstack: pins become 1-based c/z/t, range-checked against the image; unpinned
+     * dimensions are 0 (all). Plain stack (not a hyperstack): ImageJ does not know which axis
+     * the stack runs along, so at most one mapped axis may be pinned at an index &gt; 0; that
+     * index (+1) is the stack index, range-checked against the stack size. Pins at index 0 on the
+     * other axes are accepted; a pin at index 0 alone cannot be told from "the stack axis is
+     * unconstrained" and leaves the Roi on all planes. Two axes pinned &gt; 0 skip the ROI.
+     *
+     * @throws RoiConverter.SkipException for unmapped axes, out-of-range or conflicting pins
+     */
+    void place(ij.gui.Roi roi, Map<Integer, Integer> plane, ImagePlus imp, double[] axisScale) {
+        int[] idx = pins(plane, axisScale);
+        if (imp.isHyperStack()) {
+            int[] size = {imp.getNChannels(), imp.getNSlices(), imp.getNFrames()};
+            boolean any = false;
+            for (int i = 0; i < 3; i++) {
+                if (idx[i] >= size[i]) {
+                    throw new RoiConverter.SkipException("plane outside image");
+                }
+                any |= idx[i] >= 0;
+            }
+            if (any) {
+                roi.setPosition(Math.max(0, idx[0] + 1), Math.max(0, idx[1] + 1),
+                        Math.max(0, idx[2] + 1));
+            }
             return;
         }
-        if (imp.isHyperStack()) {
-            roi.setPosition(pos[0], pos[1], pos[2]);
-        } else {
-            // Plain stack: one varying dimension; unpinned size-1 dimensions are index 1.
-            roi.setPosition(imp.getStackIndex(Math.max(1, pos[0]), Math.max(1, pos[1]),
-                    Math.max(1, pos[2])));
+        int chosen = -1;
+        for (int i : idx) {
+            if (i > 0) {
+                if (chosen > 0) {
+                    throw new RoiConverter.SkipException("conflicting pins on a plain stack");
+                }
+                chosen = i;
+            }
+        }
+        if (chosen > 0) {
+            if (chosen >= imp.getStackSize()) {
+                throw new RoiConverter.SkipException("plane outside image");
+            }
+            roi.setPosition(chosen + 1);
         }
     }
 }
