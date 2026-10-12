@@ -1,0 +1,127 @@
+# Release on a v* tag: build the jar with the tag's version, attach it to a
+# GitHub Release, and (when configured) upload to a Fiji update site.
+#
+# To re-release an existing tag, run this workflow manually and pick the tag
+# (not a branch) as the ref.
+#
+# Update-site upload needs, in the repo settings:
+#   environment fiji-update-site   (add deployment protection rules there)
+#     secret   IMAGEJ_PW      the wiki password of the update site's uploader
+#   variables  UPDATE_SITE    the site's name (registered at imagej.net)
+#              WIKI_USER      the wiki user that owns the site
+# Without UPDATE_SITE the update-site job is skipped; the GitHub Release is
+# published regardless.  See https://imagej.net/update-sites/automatic-uploads
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IJ_DOWNLOAD_URL: https://downloads.imagej.net/fiji/latest/fiji-latest-linux64-jdk.zip
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.ref_name }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check the ref is a release tag
+        run: |
+          if [[ "${{ github.ref_type }}" != "tag" ]] ||
+             ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vMAJOR.MINOR.PATCH[-suffix])"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+          cache: maven
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+      - id: version
+        name: Set the version from the tag
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          mvn -B -q versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+      - name: Build and test
+        run: xvfb-run -a mvn -B verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jar
+          path: target/biopb-fiji-plugin-${{ steps.version.outputs.version }}.jar
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jar
+      - name: GitHub Release
+        run: |
+          # A suffix (v1.0.0-rc1, -beta...) marks a prerelease.
+          flags=""
+          case "$TAG" in *-*) flags="--prerelease";; esac
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; delete it first to re-release"
+            exit 1
+          fi
+          gh release create "$TAG" ./*.jar -R "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --generate-notes $flags
+
+  update-site:
+    needs: build
+    if: vars.UPDATE_SITE != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: fiji-update-site
+    env:
+      TAG: ${{ github.ref_name }}
+      UPDATE_SITE: ${{ vars.UPDATE_SITE }}
+      WIKI_USER: ${{ vars.WIKI_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+          cache: maven
+      - name: Install Fiji
+        run: |
+          curl -fsSL -o fiji.zip "$IJ_DOWNLOAD_URL"
+          unzip -q fiji.zip
+          ./Fiji.app/fiji-linux-x64 --headless --update update
+      - name: Install the plugin and the jars Fiji lacks
+        run: |
+          mvn -B -q versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+          mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+      - name: Upload to the update site
+        env:
+          UPDATE_PASS: ${{ secrets.IMAGEJ_PW }}
+        run: |
+          fiji=./Fiji.app/fiji-linux-x64
+          $fiji --headless --update edit-update-site "$UPDATE_SITE" \
+            "https://sites.imagej.net/$UPDATE_SITE/" "webdav:$WIKI_USER:$UPDATE_PASS" .
+          $fiji --headless --update upload-complete-site --force "$UPDATE_SITE"
