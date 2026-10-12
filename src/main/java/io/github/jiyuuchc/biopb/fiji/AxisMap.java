@@ -40,20 +40,21 @@ public final class AxisMap {
     public static AxisMap resolve(List<String> labels, long[] shape, String override) {
         int n = shape.length;
         int[] r = {-1, -1, -1, -1, -1, -1};
+        boolean hasOverride = override != null && !override.trim().isEmpty();
         if (n < 2) {
-            throw new IllegalArgumentException("Tensor has " + n + " dimension(s); at least y and x are required");
+            throw new AxisMappingException(AxisMappingException.Reason.OTHER, "Tensor has " + n + " dimension(s); at least y and x are required");
         }
         if (override != null && !override.trim().isEmpty()) {
             String o = override.trim().toLowerCase(Locale.ROOT);
             if (o.length() != n) {
-                throw new IllegalArgumentException("Axis override \"" + override + "\" has " + o.length()
+                throw new AxisMappingException(AxisMappingException.Reason.INVALID_OVERRIDE, "Axis override \"" + override + "\" has " + o.length()
                         + " characters but the tensor has " + n + " axes");
             }
-            for (int d = 0; d < n; d++) assign(r, o.substring(d, d + 1), d, shape);
+            for (int d = 0; d < n; d++) assign(r, o.substring(d, d + 1), d, shape, true);
         } else if (isUnlabeled(labels, n)) {
             for (int d = 0; d < n - 2; d++) {
                 if (shape[d] != 1) {
-                    throw new IllegalArgumentException("Tensor has " + n + " unlabeled axes (shape "
+                    throw new AxisMappingException(AxisMappingException.Reason.NEEDS_OVERRIDE, "Tensor has " + n + " unlabeled axes (shape "
                             + Arrays.toString(shape) + "); only the last two (y, x) can be assumed. "
                             + "Pass an axis override with one role letter per axis (t c z y x s -), e.g. \""
                             + "tczyx".substring(Math.max(0, 5 - n)) + "\"");
@@ -67,23 +68,24 @@ public final class AxisMap {
                 String role = roleOf(l);
                 if (role == null) {
                     if (shape[d] != 1) {
-                        throw new IllegalArgumentException("Unsupported axis \"" + l + "\" (size " + shape[d]
+                        throw new AxisMappingException(AxisMappingException.Reason.NEEDS_OVERRIDE, "Unsupported axis \"" + l + "\" (size " + shape[d]
                                 + "). Only t, c, z, y, x and s are supported (at most 5 non-singleton dimensions); "
                                 + "use an axis override to name it");
                     }
                     role = "-";
                 }
-                assign(r, role, d, shape);
+                assign(r, role, d, shape, false);
             }
         }
         if (r[3] < 0 || r[4] < 0) {
-            throw new IllegalArgumentException("Could not find both y and x axes in labels " + labels);
+            throw new AxisMappingException(hasOverride ? AxisMappingException.Reason.INVALID_OVERRIDE : AxisMappingException.Reason.NEEDS_OVERRIDE,
+                    "Could not find both y and x axes " + (hasOverride ? "in the axis override" : "in labels " + labels));
         }
         long czt = 1;
         for (int a : new int[] {r[0], r[1], r[2], r[3], r[4]}) {
             if (a < 0) continue;
             if (shape[a] > Integer.MAX_VALUE) {
-                throw new IllegalArgumentException("Axis " + a + " has size " + shape[a] + ", too large for ImageJ");
+                throw new AxisMappingException(AxisMappingException.Reason.OTHER, "Axis " + a + " has size " + shape[a] + ", too large for ImageJ");
             }
         }
         try {
@@ -92,30 +94,32 @@ public final class AxisMap {
             czt = Long.MAX_VALUE;
         }
         if (czt > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("c*z*t = " + czt + " planes exceeds ImageJ's stack limit of 2^31-1");
+            throw new AxisMappingException(AxisMappingException.Reason.OTHER, "c*z*t = " + czt + " planes exceeds ImageJ's stack limit of 2^31-1");
         }
         if (r[5] >= 0 && shape[r[5]] == 1) r[5] = -1;
         if (r[5] >= 0 && shape[r[5]] != 3) {
-            throw new IllegalArgumentException("Sample axis has size " + shape[r[5]] + "; only 3 (RGB) is supported");
+            throw new AxisMappingException(AxisMappingException.Reason.OTHER, "Sample axis has size " + shape[r[5]] + "; only 3 (RGB) is supported");
         }
         if (r[5] >= 0 && r[1] >= 0 && shape[r[1]] > 1) {
-            throw new IllegalArgumentException("RGB (sample axis) with " + shape[r[1]] + " channels is not supported: "
+            throw new AxisMappingException(AxisMappingException.Reason.OTHER, "RGB (sample axis) with " + shape[r[1]] + " channels is not supported: "
                     + "ImageJ cannot make a composite of RGB images. Open a single channel by dropping the channel axis");
         }
         return new AxisMap(r, n);
     }
 
-    private static void assign(int[] r, String role, int d, long[] shape) {
+    private static void assign(int[] r, String role, int d, long[] shape, boolean fromOverride) {
+        AxisMappingException.Reason bad = fromOverride ? AxisMappingException.Reason.INVALID_OVERRIDE
+                : AxisMappingException.Reason.NEEDS_OVERRIDE;
         if (role.equals("-")) {
             if (shape[d] != 1) {
-                throw new IllegalArgumentException("Axis " + d + " is ignored but has size " + shape[d]);
+                throw new AxisMappingException(bad, "Axis " + d + " is ignored but has size " + shape[d]);
             }
             return;
         }
         int i = ROLES.indexOf(role);
-        if (i < 0) throw new IllegalArgumentException("Unknown axis role \"" + role + "\"; use one of t c z y x s -");
+        if (i < 0) throw new AxisMappingException(bad, "Unknown axis role \"" + role + "\"; use one of t c z y x s -");
         if (r[i] >= 0) {
-            throw new IllegalArgumentException("Axis role '" + role + "' assigned twice (axes " + r[i] + " and " + d + ")");
+            throw new AxisMappingException(bad, "Axis role '" + role + "' assigned twice (axes " + r[i] + " and " + d + ")");
         }
         r[i] = d;
     }

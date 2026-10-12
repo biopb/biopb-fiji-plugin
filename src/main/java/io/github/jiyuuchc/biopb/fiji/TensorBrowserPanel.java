@@ -195,7 +195,7 @@ public class TensorBrowserPanel extends JPanel {
      */
     public TensorBrowserPanel(ClientFactory factory, String initialAddress) {
         super(new BorderLayout(0, 4));
-        this.factory = factory;
+        this.factory = (h, p) -> new RefCountedConnection(factory.connect(h, p));
         address.setText(initialAddress);
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
@@ -262,6 +262,11 @@ public class TensorBrowserPanel extends JPanel {
 
     /** The current connection, or {@code null} if not connected. Call on the EDT. */
     public Connection getConnection() { return connection; }
+
+    /** The current connection as a shared one (images hold references to it), or {@code null}. EDT. */
+    public RefCountedConnection getSharedConnection() {
+        return connection instanceof RefCountedConnection ? (RefCountedConnection) connection : null;
+    }
 
     /** The current Flight client, or {@code null} if not connected (or a test double). Call on the EDT. */
     public TensorFlightClient getClient() { return connection == null ? null : connection.flight(); }

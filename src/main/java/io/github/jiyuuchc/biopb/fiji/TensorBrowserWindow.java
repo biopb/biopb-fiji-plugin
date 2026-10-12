@@ -36,7 +36,7 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
         add(south, BorderLayout.SOUTH);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setSize(480, 640);
-        panel.addListener(new TensorBrowserController(panel::getClient, this));
+        panel.addListener(new TensorBrowserController(panel::getSharedConnection, this));
         addWindowListener(new WindowAdapter() {
             @Override public void windowClosed(WindowEvent e) {
                 panel.dispose();
@@ -56,8 +56,15 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
      */
     public static TensorBrowserWindow showWindow(Supplier<TensorBrowserPanel> panels) {
         if (instance == null) {
-            instance = new TensorBrowserWindow(panels.get());
-            instance.setLocationByPlatform(true);
+            TensorBrowserPanel p = panels.get();
+            try {
+                TensorBrowserWindow w = new TensorBrowserWindow(p);
+                w.setLocationByPlatform(true);
+                instance = w;
+            } catch (Throwable t) {
+                p.dispose();
+                throw t;
+            }
         }
         TensorBrowserWindow w = instance;
         w.setVisible(true);
@@ -83,21 +90,30 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
 
     @Override public void show(ImagePlus imp) { imp.show(); }
 
+    private java.awt.Component parent() { return isDisplayable() ? this : null; }
+
     @Override public boolean confirm(String title, String message) {
-        return JOptionPane.showConfirmDialog(this, message, title, JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION;
+        return JOptionPane.showConfirmDialog(parent(), message, title, JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION;
     }
 
-    @Override public String askAxes(String message) {
-        return JOptionPane.showInputDialog(this, message + "\n\nAxis roles, one letter per axis (t c z y x s -):",
-                "Axis override", JOptionPane.QUESTION_MESSAGE);
+    @Override public String askAxes(String message, String previous) {
+        return (String) JOptionPane.showInputDialog(parent(),
+                message + "\n\nAxis roles, one letter per axis (t c z y x s -):",
+                "Axis override", JOptionPane.QUESTION_MESSAGE, null, null, previous);
     }
 
     @Override public void error(String title, String message) {
-        JOptionPane.showMessageDialog(this, message, title, JOptionPane.ERROR_MESSAGE);
+        JOptionPane.showMessageDialog(parent(), message, title, JOptionPane.ERROR_MESSAGE);
     }
 
-    /** Runs {@link #showWindow} on the EDT. */
-    static void showLater(Supplier<TensorBrowserPanel> panels) {
-        SwingUtilities.invokeLater(() -> showWindow(panels));
+    /** Runs {@link #showWindow} on the EDT; a failure goes to {@code onError}. */
+    static void showLater(Supplier<TensorBrowserPanel> panels, java.util.function.Consumer<Throwable> onError) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                showWindow(panels);
+            } catch (Throwable t) {
+                onError.accept(t);
+            }
+        });
     }
 }

@@ -1,5 +1,6 @@
 package io.github.jiyuuchc.biopb.fiji;
 
+import ij.IJ;
 import java.awt.GraphicsEnvironment;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
@@ -19,6 +20,9 @@ public class TensorBrowserCommand implements Command {
             log.warn("biopb Tensor Browser needs a display; not available in headless mode");
             return;
         }
-        TensorBrowserWindow.showLater(TensorBrowserPanel::new);
+        TensorBrowserWindow.showLater(TensorBrowserPanel::new, t -> {
+            log.error("biopb Tensor Browser could not start", t);
+            IJ.handleException(t);
+        });
     }
 }

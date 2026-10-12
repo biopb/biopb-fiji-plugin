@@ -223,14 +223,16 @@ public final class TensorOpener {
         long max = TensorVirtualStack.maxPlanePixels(limit, bytesPerPixel);
         if (px <= max) return;
         String hintText = "no coarser pyramid level is available";
+        int suggested = -1;
         for (int k = level + 1; k < pyramid.size(); k++) {
             if (planePixels(toArray(pyramid.get(k).getShapeList()), map) <= max) {
                 hintText = "try pyramid level " + k;
+                suggested = k;
                 break;
             }
         }
         throw new PlaneTooLargeException("A single plane at level " + level + " has " + px + " pixels (limit " + max
-                + ", from the plane limit, ImageJ's array size and available heap); " + hintText, px, max);
+                + ", from the plane limit, ImageJ's array size and available heap); " + hintText, px, max, suggested);
     }
 
     private static long planePixels(long[] shape, AxisMap map) {

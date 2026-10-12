@@ -1,26 +1,20 @@
 package io.github.jiyuuchc.biopb.fiji;
 
-import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.ExecutionException;
 
-/** Decides how a failed open is presented to the user. No UI, so it is unit-testable. */
+/** Decides how a failed open is presented to the user, by exception type. No UI, so it is unit-testable. */
 public final class OpenFailure {
     /** What to do about a failure. */
     public enum Kind {
         /** A plane is too large; offer the suggested coarser level (if any). */
         TOO_LARGE,
-        /** The axes could not be mapped; ask for an axis override and retry. */
+        /** The axes need an override from the user (none given yet). */
         NEEDS_AXES,
+        /** The override the user gave was wrong; say so and ask again. */
+        INVALID_AXES,
         /** Anything else: show the cause. */
         OTHER
     }
-
-    private static final Pattern LEVEL_HINT = Pattern.compile("try pyramid level (\\d+)");
-    private static final String[] AXIS_MARKERS = {
-        "unlabeled", "axis override", "unsupported axis", "unknown axis role", "assigned twice",
-        "could not find both y and x", "is ignored but has size"
-    };
 
     /** The classified failure. */
     public final Kind kind;
@@ -35,22 +29,20 @@ public final class OpenFailure {
         this.message = message;
     }
 
-    /** Classifies {@code t}, unwrapping an ExecutionException-style wrapper. */
+    /** Classifies {@code t}, unwrapping an ExecutionException wrapper. */
     public static OpenFailure classify(Throwable t) {
-        while (t instanceof java.util.concurrent.ExecutionException && t.getCause() != null) {
+        while (t instanceof ExecutionException && t.getCause() != null) {
             t = t.getCause();
         }
         String msg = describe(t);
         if (t instanceof PlaneTooLargeException) {
-            Matcher m = LEVEL_HINT.matcher(msg);
-            return new OpenFailure(Kind.TOO_LARGE, m.find() ? Integer.parseInt(m.group(1)) : -1, msg);
+            return new OpenFailure(Kind.TOO_LARGE, ((PlaneTooLargeException) t).getSuggestedLevel(), msg);
         }
-        if (t instanceof IllegalArgumentException && msg != null) {
-            String low = msg.toLowerCase(Locale.ROOT);
-            for (String k : AXIS_MARKERS) {
-                if (low.contains(k)) {
-                    return new OpenFailure(Kind.NEEDS_AXES, -1, msg);
-                }
+        if (t instanceof AxisMappingException) {
+            switch (((AxisMappingException) t).getReason()) {
+                case NEEDS_OVERRIDE: return new OpenFailure(Kind.NEEDS_AXES, -1, msg);
+                case INVALID_OVERRIDE: return new OpenFailure(Kind.INVALID_AXES, -1, msg);
+                default: break;
             }
         }
         return new OpenFailure(Kind.OTHER, -1, msg);

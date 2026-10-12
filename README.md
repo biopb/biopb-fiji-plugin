@@ -28,17 +28,19 @@ the server when you look at them.
 ## Usage
 
 1. *Plugins > BioPB > Tensor Browser* opens the browser window (running it again
-   brings the same window to the front; closing it closes the server connection).
+   brings the same window to the front). Closing the window does not affect images
+   already opened from it: the server connection stays open until the last of those
+   images is closed, and then closes.
 2. Enter the server as `host[:port]` (default `localhost:8815`, or the
    `BIOPB_TENSOR_URL` environment variable) and press **Connect**.
 3. Browse the catalog (folders load as you expand them), or type in the search box
    (searched on the server).
-4. **Double-click** a tensor to open it at full resolution. Right-click for "Open at coarser level…" (pick a pyramid level) at a
-   coarser pyramid level. If a single plane is too large (the default limit is 2^28
-   pixels, and ImageJ cannot hold more than 2^31-1 per array), you are offered the
-   nearest coarser level that fits.
+4. **Double-click** a tensor to open it at full resolution. Right-click it for
+   "Open at coarser level…", which asks for a pyramid level. If a single plane is too
+   large (the default limit is 2^28 pixels; ImageJ also cannot hold more than 2^31-1
+   per array), you are offered the nearest coarser level that fits.
 5. **Load ROIs** (right-click menu): annotations stored on the server for the tensor are
-   added to the overlay of the already-open image. Open the image first. The status
+   added to the overlay of the already-open image (opened from the same connection; the current image if several match, else the finest level). Open the image first. The status
    line reports how many loaded, how many were skipped and why, and whether the
    server's per-tensor cap truncated the set.
 
@@ -67,10 +69,10 @@ discovery, SDK class loading, an Arrow allocation).
 
 Push a tag `vX.Y.Z`. The release workflow builds the jar with that version and attaches
 it to a GitHub Release. If the repository variable `UPDATE_SITE` is set, it also uploads
-to the Fiji update site; that job runs in the `fiji-update-site` environment, which needs
+to the Fiji update site; that job runs in the `fiji-update-site` environment, which needs:
 
 - variables `UPDATE_SITE` (the site name registered at imagej.net) and `WIKI_USER`
-  (the wiki user owning the site), and
+  (the wiki user owning the site);
 - secret `IMAGEJ_PW` (that user's wiki password).
 
 See the header of `.github/workflows/release.yml` and
