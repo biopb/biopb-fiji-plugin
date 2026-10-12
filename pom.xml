@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.scijava</groupId>
+    <artifactId>pom-scijava</artifactId>
+    <version>43.0.0</version>
+    <relativePath />
+  </parent>
+
+  <groupId>io.github.jiyuuchc</groupId>
+  <artifactId>biopb-fiji-plugin</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>biopb-fiji-plugin</name>
+  <description>Fiji/ImageJ2 plugin: browse and open tensors served by a biopb tensor server</description>
+  <url>https://github.com/biopb/biopb-fiji-plugin</url>
+  <inceptionYear>2026</inceptionYear>
+  <organization>
+    <name>biopb</name>
+    <url>https://github.com/biopb</url>
+  </organization>
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/licenses/MIT</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>jiyuuchc</id>
+      <name>Ji Yu</name>
+      <roles><role>founder</role><role>lead</role><role>developer</role></roles>
+    </developer>
+  </developers>
+
+  <contributors>
+    <contributor><name>None</name></contributor>
+  </contributors>
+  <mailingLists>
+    <mailingList>
+      <name>Image.sc Forum</name>
+      <archive>https://forum.image.sc/</archive>
+    </mailingList>
+  </mailingLists>
+  <ciManagement>
+    <system>GitHub Actions</system>
+    <url>https://github.com/biopb/biopb-fiji-plugin/actions</url>
+  </ciManagement>
+
+  <scm>
+    <connection>scm:git:https://github.com/biopb/biopb-fiji-plugin</connection>
+    <developerConnection>scm:git:git@github.com:biopb/biopb-fiji-plugin</developerConnection>
+    <tag>HEAD</tag>
+    <url>https://github.com/biopb/biopb-fiji-plugin</url>
+  </scm>
+  <issueManagement>
+    <system>GitHub Issues</system>
+    <url>https://github.com/biopb/biopb-fiji-plugin/issues</url>
+  </issueManagement>
+
+  <properties>
+    <package-name>io.github.jiyuuchc.biopb.fiji</package-name>
+    <license.licenseName>mit</license.licenseName>
+    <license.copyrightOwners>biopb</license.copyrightOwners>
+
+    <!-- Fiji Latest bundles Java 21; the biopb SDK targets Java 11. -->
+    <scijava.jvm.version>11</scijava.jvm.version>
+    <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
+
+    <!-- catalogChildren (lazy catalog reads) is first in 0.13.0rc1. -->
+    <biopb.version>0.13.0rc1</biopb.version>
+
+    <!-- Arrow needs java.nio opened; Fiji's launcher provides this at runtime. -->
+    <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>scijava.public</id>
+      <url>https://maven.scijava.org/content/groups/public</url>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.jiyuuchc</groupId>
+      <artifactId>biopb</artifactId>
+      <version>${biopb.version}</version>
+    </dependency>
+
+    <!-- Provided by Fiji at runtime. -->
+    <dependency>
+      <groupId>net.imagej</groupId>
+      <artifactId>imagej</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.imglib2</groupId>
+      <artifactId>imglib2</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
