@@ -36,6 +36,8 @@ public class TensorBrowserPanelTest {
         final List<String> queries = new CopyOnWriteArrayList<>();
         final AtomicBoolean badFails = new AtomicBoolean(true);
         final AtomicBoolean searchFails = new AtomicBoolean();
+        volatile CountDownLatch queryGate; // holds the first query open when set
+        final AtomicInteger queryCalls = new AtomicInteger();
         final AtomicInteger closed = new AtomicInteger();
 
         @Override
@@ -60,6 +62,14 @@ public class TensorBrowserPanelTest {
         public List<Map<String, Object>> query(String sql) throws IOException {
             threads.add(Thread.currentThread().getName());
             queries.add(sql);
+            CountDownLatch g = queryGate;
+            if (g != null && queryCalls.getAndIncrement() == 0) {
+                try {
+                    g.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    throw new IOException(e);
+                }
+            }
             if (searchFails.get()) {
                 throw new IOException("down");
             }
@@ -232,13 +242,13 @@ public class TensorBrowserPanelTest {
     }
 
     @Test
-    public void staleConnectResultIsClosed() throws Exception {
+    public void connectResultAfterDisposeIsClosed() throws Exception {
         gate = new CountDownLatch(1);
-        edt(panel::connect); // first, held open
-        edt(panel::connect); // second supersedes it
+        edt(panel::connect); // held open
+        edt(panel::dispose);
         gate.countDown();
-        await(() -> opened.size() == 2 && panel.getConnection() != null);
-        await(() -> opened.get(0).closed.get() + opened.get(1).closed.get() == 1);
+        await(() -> opened.size() == 1 && opened.get(0).closed.get() == 1);
+        assertEquals(null, panel.getConnection());
     }
 
     @Test
@@ -289,5 +299,63 @@ public class TensorBrowserPanelTest {
         });
         assertEquals(Arrays.asList("open s1/0 0", "rois s1/0"), calls);
         assertNotNull(panel.getConnection());
+    }
+
+    private int rootChildren() {
+        return ((DefaultMutableTreeNode) panel.getTree().getModel().getRoot()).getChildCount();
+    }
+
+    @Test
+    public void watcherRerunCarriesTheFreshStepOfASearchInFlight() throws Exception {
+        connect();
+        fake.queryGate = new CountDownLatch(1);
+        edt(() -> panel.getSearchField().setText("img"));
+        await(() -> fake.queries.size() == 1); // out, held
+        edt(panel::simulateCatalogChange); // supersedes it
+        await(() -> fake.queries.size() == 2);
+        fake.queryGate.countDown();
+        await(() -> panel.getSearchStatusLabel().getText().contains("1 match"));
+        edt(() -> assertTrue(panel.getTree().isExpanded(new TreePath(
+                ((DefaultMutableTreeNode) ((DefaultMutableTreeNode) panel.getTree().getModel().getRoot())
+                        .getChildAt(0)).getPath()))));
+    }
+
+    @Test
+    public void failedFreshSearchRetriesOnResubmit() throws Exception {
+        connect();
+        fake.searchFails.set(true);
+        edt(() -> panel.getSearchField().setText("img"));
+        await(() -> panel.getSearchStatusLabel().getText().contains("failed"));
+        assertEquals(0, rootChildren());
+        fake.searchFails.set(false);
+        edt(panel::applySearch); // the same text again
+        await(() -> panel.getSearchStatusLabel().getText().contains("1 match"));
+        assertEquals(1, rootChildren());
+    }
+
+    @Test
+    public void failedWatcherRerunKeepsThePreviousResults() throws Exception {
+        connect();
+        edt(() -> panel.getSearchField().setText("img"));
+        await(() -> panel.getSearchStatusLabel().getText().contains("1 match"));
+        fake.searchFails.set(true);
+        edt(panel::simulateCatalogChange);
+        await(() -> panel.getSearchStatusLabel().getText().contains("previous results"));
+        assertEquals(1, rootChildren());
+    }
+
+    @Test
+    public void connectDisablesTheControlsAndIgnoresAnOverlappingConnect() throws Exception {
+        gate = new CountDownLatch(1);
+        edt(panel::connect);
+        edt(() -> {
+            assertFalse(panel.getConnectButton().isEnabled());
+            assertFalse(panel.getAddressField().isEnabled());
+            panel.connect(); // Enter in the field would do this
+        });
+        gate.countDown();
+        await(() -> panel.getConnection() != null && panel.getConnectButton().isEnabled());
+        assertEquals(1, connectThreads.size());
+        assertTrue(panel.getAddressField().isEnabled());
     }
 }

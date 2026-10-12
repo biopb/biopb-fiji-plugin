@@ -183,6 +183,14 @@ public class TreeModelBuilderTest {
         assertEquals("example.org", hp[0]);
         assertEquals(9000, hp[1]);
         assertEquals(8815, TensorBrowserPanel.parseAddress("example.org")[1]);
+        for (String bad : new String[] {"h:0", "h:70000", "h:x"}) {
+            try {
+                TensorBrowserPanel.parseAddress(bad);
+                org.junit.Assert.fail(bad);
+            } catch (IllegalArgumentException expected) {
+                // rejected
+            }
+        }
         assertEquals("[::1]", TensorBrowserPanel.parseAddress("[::1]")[0]);
         assertEquals(8815, TensorBrowserPanel.parseAddress("[::1]")[1]);
         assertEquals(9, TensorBrowserPanel.parseAddress("grpc://[::1]:9/x/y")[1]);

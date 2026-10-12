@@ -59,7 +59,9 @@ import javax.swing.tree.TreeSelectionModel;
  * (connect, read a folder, search) runs on a {@link SwingWorker}; the
  * {@link SourceList} change callback, which arrives on its watcher thread, is
  * marshalled to the EDT. {@link SourceList} reads the open folders through a
- * volatile snapshot kept up to date on the EDT.
+ * volatile snapshot kept up to date on the EDT. {@link SourceList} keeps its sources and levels as volatile
+ * immutable snapshots and takes its lock in {@code addSources}, so the search worker may call that off the EDT,
+ * and the EDT's reads of the snapshots never wait on server I/O.
  */
 public class TensorBrowserPanel extends JPanel {
     private static final Logger LOG = Logger.getLogger(TensorBrowserPanel.class.getName());
@@ -136,7 +138,11 @@ public class TensorBrowserPanel extends JPanel {
             return new Object[] {host, DEFAULT_PORT};
         }
         try {
-            return new Object[] {host, Integer.parseInt(port)};
+            int n = Integer.parseInt(port);
+            if (n < 1 || n > 65535) {
+                throw new NumberFormatException();
+            }
+            return new Object[] {host, n};
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Bad port in '" + address + "'");
         }
@@ -157,7 +163,11 @@ public class TensorBrowserPanel extends JPanel {
     // EDT-only state.
     private Connection connection;
     private String connectionName = "";
-    private String searchQuery = ""; // the query the search view is for (or being fetched for)
+    private String searchQuery = ""; // the query the search view shows; set when its answer lands
+    private boolean inFlight; // a search is out ...
+    private String inFlightQuery = ""; // ... for this query ...
+    private boolean inFlightFresh; // ... and its landing should open the top folders
+    private boolean disposed;
     private final Set<String> openSources = new HashSet<>(); // multi-tensor sources open
     private SourceList list;
     private int connectGen;
@@ -258,6 +268,9 @@ public class TensorBrowserPanel extends JPanel {
 
     /** Connects to the address in the field (asynchronous); a no-op while the field is invalid. */
     public void connect() {
+        if (disposed || !connectButton.isEnabled()) {
+            return; // one connect at a time
+        }
         Object[] hp;
         try {
             hp = parseAddress(address.getText());
@@ -269,6 +282,7 @@ public class TensorBrowserPanel extends JPanel {
         int port = (Integer) hp[1];
         int gen = ++connectGen;
         connectButton.setEnabled(false);
+        address.setEnabled(false);
         status.setText("Connecting to " + host + ":" + port + "…");
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
@@ -285,15 +299,19 @@ public class TensorBrowserPanel extends JPanel {
             }
 
             @Override protected void done() {
+                if (!disposed) { // however it ended, the controls are usable again
+                    connectButton.setEnabled(true);
+                    address.setEnabled(true);
+                }
                 Object[] r;
                 try {
                     r = get();
                 } catch (Exception e) {
                     if (gen == connectGen) {
-                        connectButton.setEnabled(true);
                         Throwable cause = e.getCause() == null ? e : e.getCause();
-                        status.setText(connection == null ? "Connection failed: " + cause.getMessage()
-                                : "Connection to " + host + ":" + port + " failed (" + cause.getMessage()
+                        String why = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getName();
+                        status.setText(connection == null ? "Connection failed: " + why
+                                : "Connection to " + host + ":" + port + " failed (" + why
                                         + "); still connected to " + connectionName);
                     }
                     return;
@@ -304,7 +322,6 @@ public class TensorBrowserPanel extends JPanel {
                     release(c, l);
                     return;
                 }
-                connectButton.setEnabled(true);
                 install(c, l, host + ":" + port);
             }
         }.execute();
@@ -312,19 +329,29 @@ public class TensorBrowserPanel extends JPanel {
 
     /** Stops the watcher and closes the connection; the panel is not used again. */
     public void dispose() {
+        disposed = true;
         connectGen++;
         searchGen++;
+        inFlight = false;
         debounce.stop();
-        release(connection, list);
+        Thread closing = release(connection, list);
         connection = null;
         list = null;
+        folderNodes = new HashMap<>();
+        if (closing != null && !SwingUtilities.isEventDispatchThread()) {
+            try { // a short wait, so a JVM exit right after rarely cuts the close off
+                closing.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     // --- connection ----------------------------------------------------------
 
-    private static void release(Connection c, SourceList l) {
+    private static Thread release(Connection c, SourceList l) {
         if (l == null && c == null) {
-            return;
+            return null;
         }
         // Closing stops the watcher's executor and shuts a channel down, either of
         // which can wait; neither belongs on the EDT.
@@ -333,14 +360,21 @@ public class TensorBrowserPanel extends JPanel {
                 if (l != null) {
                     l.close();
                 }
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "Closing the source list failed", e);
             } finally {
-                if (c != null) {
-                    c.close();
+                try {
+                    if (c != null) {
+                        c.close();
+                    }
+                } catch (RuntimeException e) {
+                    LOG.log(Level.WARNING, "Closing the connection failed", e);
                 }
             }
         }, "biopb-close");
         t.setDaemon(true);
         t.start();
+        return t;
     }
 
     private void install(Connection c, SourceList l, String name) {
@@ -351,6 +385,9 @@ public class TensorBrowserPanel extends JPanel {
         searchGen++;
         searchResult = null;
         searchQuery = "";
+        inFlight = false;
+        viewKey = "";
+        folderNodes = new HashMap<>();
         openSources.clear();
         expanded.clear();
         searchOpen = new HashSet<>();
@@ -365,11 +402,7 @@ public class TensorBrowserPanel extends JPanel {
         l.setOpenKeys(() -> openSnapshot);
         l.setOnChanged(sources -> SwingUtilities.invokeLater(() -> {
             if (list == l) { // the catalog changed: redraw, or re-run the active search in place
-                if (searchQuery.isEmpty()) {
-                    rebuild();
-                } else {
-                    runSearch(searchQuery, false);
-                }
+                onCatalogChanged();
             }
         }));
         l.startWatch();
@@ -389,9 +422,10 @@ public class TensorBrowserPanel extends JPanel {
     private void rebuild() {
         if (list == null) {
             model.setRoot(new DefaultMutableTreeNode());
+            folderNodes = new HashMap<>();
             return;
         }
-        String key = search.getText().trim().toLowerCase();
+        String key = searchResult != null ? "search:" + searchQuery : "tree"; // the view shown
         boolean keepView = key.equals(viewKey);
         viewKey = key;
         Point pos = scroll.getViewport().getViewPosition();
@@ -555,17 +589,31 @@ public class TensorBrowserPanel extends JPanel {
     /** Applies the search box: runs the search, or restores the folder tree when it is empty. */
     private void applyFilter() {
         String q = search.getText().trim().toLowerCase();
-        if (list == null || q.equals(searchQuery)) {
-            return; // nothing changed; a search already out for this query is left to land
+        if (list == null) {
+            return;
         }
-        searchQuery = q;
         if (q.isEmpty()) {
-            searchGen++; // an answer still in flight is no longer wanted
-            searchResult = null;
-            searchStatus.setText(" ");
+            if (searchResult != null || inFlight) { // back to the folder tree
+                searchGen++; // an answer still in flight is no longer wanted
+                inFlight = false;
+                searchQuery = "";
+                searchResult = null;
+                searchStatus.setText(" ");
+                rebuild();
+            }
+        } else if (!(inFlight ? q.equals(inFlightQuery) : q.equals(searchQuery) && searchResult != null)) {
+            runSearch(q, true); // a search already out for this query is left to land
+        }
+    }
+
+    /** The catalog changed under us: redraw, or re-run the active search in place. */
+    private void onCatalogChanged() {
+        if (inFlight) {
+            runSearch(inFlightQuery, false); // carries the fresh step of the one it supersedes
+        } else if (searchQuery.isEmpty() || searchResult == null) {
             rebuild();
         } else {
-            runSearch(q, true);
+            runSearch(searchQuery, false);
         }
     }
 
@@ -575,7 +623,11 @@ public class TensorBrowserPanel extends JPanel {
      * @param fresh a new query: its top folders open. A re-run for a changed catalog
      *        keeps what the user has open.
      */
-    private void runSearch(String q, boolean fresh) {
+    private void runSearch(String q, boolean fresh0) {
+        boolean fresh = fresh0 || inFlight && inFlightFresh;
+        inFlight = true;
+        inFlightQuery = q;
+        inFlightFresh = fresh;
         int gen = ++searchGen;
         SourceList l = list;
         Connection c = connection;
@@ -600,6 +652,7 @@ public class TensorBrowserPanel extends JPanel {
                 if (gen != searchGen) {
                     return; // superseded while in flight
                 }
+                inFlight = false;
                 try {
                     Object[] r = get();
                     searchResult = (Map<String, Map<String, Object>>) r[0];
@@ -607,15 +660,22 @@ public class TensorBrowserPanel extends JPanel {
                             + (searchResult.size() == 1 ? "" : "es")
                             + ((Boolean) r[1] ? " \u2022 first " + TreeModelBuilder.SEARCH_LIMIT
                                     + " shown, refine the search" : ""));
+                    searchQuery = q;
                     if (fresh) {
                         searchOpen = new HashSet<>(TreeModelBuilder.topFolders(
                                 TreeModelBuilder.buildPaths(searchResult.values()), 1));
                     }
                 } catch (Exception e) {
                     LOG.log(Level.FINE, "Search failed", e);
-                    // Not the previous query's matches under this query's name.
-                    searchResult = new LinkedHashMap<>();
-                    searchStatus.setText("Search failed \u2022 the server did not answer");
+                    if (fresh || searchResult == null) {
+                        // Not the previous query's matches (or folders) under this query's name.
+                        searchResult = new LinkedHashMap<>();
+                        searchOpen = new HashSet<>();
+                        searchQuery = "";
+                        searchStatus.setText("Search failed \u2022 the server did not answer");
+                    } else { // a re-run for a changed catalog: the last answer still stands
+                        searchStatus.setText("Search failed \u2022 showing the previous results");
+                    }
                 }
                 rebuild();
             }
@@ -735,13 +795,9 @@ public class TensorBrowserPanel extends JPanel {
     // --- test access ---------------------------------------------------------
 
     /** What the watcher's change callback does, without waiting for a poll. */
-    void simulateCatalogChange() {
-        if (searchQuery.isEmpty()) {
-            rebuild();
-        } else {
-            runSearch(searchQuery, false);
-        }
-    }
+    void applySearch() { applyFilter(); }
+    JButton connectButtonForTest() { return connectButton; }
+    void simulateCatalogChange() { onCatalogChanged(); }
 
     JTree getTree() { return tree; }
     JTextField getAddressField() { return address; }
