@@ -56,9 +56,11 @@ public final class SourceList implements AutoCloseable {
 
     private final Supplier<CatalogClient> connection;
     private final long intervalMs;
-    private ScheduledExecutorService executor; // guarded by lock; null until the watcher starts
+    private ScheduledExecutorService executor; // guarded by the instance monitor; null until the watcher starts
     private final boolean ownsExecutor;
     private ScheduledFuture<?> watch;
+    private boolean closed;
+    private final Object pollLock = new Object(); // serializes polls
 
     // The watcher and the folder workers both commit levels; a commit is whole,
     // and one begun before a clear() is dropped.
@@ -121,7 +123,11 @@ public final class SourceList implements AutoCloseable {
         return lazy;
     }
 
-    /** Sets the folder keys the user has open, asked on each re-list. */
+    /**
+     * Sets the folder keys the user has open, asked on each re-list. The supplier
+     * is called on worker and watcher threads, so it must be thread-safe (return a
+     * snapshot, not a live UI collection).
+     */
     public void setOpenKeys(Supplier<? extends Collection<String>> openKeys) {
         this.openKeys = openKeys;
     }
@@ -179,8 +185,9 @@ public final class SourceList implements AutoCloseable {
             return sources;
         }
         Map<String, Map<String, Object>> listed = indexById(client.query(sourcesSql(sourceColumns(client))));
+        CatalogClient now = connection.get();
         synchronized (lock) {
-            checkCurrent(client, startEpoch);
+            checkCurrent(client, startEpoch, now);
             lazy = false;
             levels = Collections.emptyMap();
             sources = listed;
@@ -191,18 +198,23 @@ public final class SourceList implements AutoCloseable {
     /** Reads the levels; false when the server (or SDK) cannot serve them. */
     private boolean refreshLevels(CatalogClient client, int startEpoch,
             Map<String, CatalogClient.Level> before) throws IOException {
-        CatalogClient.Level top;
+        CatalogClient.Level top = null;
+        boolean unsupported = false;
         try {
             top = client.catalogChildren("", LEVEL_LIMIT);
-        } catch (UnsupportedOperationException e) {
-            top = null;
+        } catch (UnsupportedOperationException e) { // only an old server latches
+            unsupported = true;
         }
-        if (top == null) {
+        if (unsupported) {
+            CatalogClient now = connection.get();
             synchronized (lock) {
-                checkCurrent(client, startEpoch);
+                checkCurrent(client, startEpoch, now);
                 lazyUnsupported = true;
             }
             return false;
+        }
+        if (top == null) {
+            throw new IOException("unexpected catalog_children answer for the top");
         }
         Map<String, CatalogClient.Level> fresh = new LinkedHashMap<>();
         fresh.put("", top);
@@ -246,8 +258,9 @@ public final class SourceList implements AutoCloseable {
             }
         }
         Map<String, Map<String, Object>> described = describe(ids, client);
+        CatalogClient current = connection.get();
         synchronized (lock) {
-            checkCurrent(client, startEpoch);
+            checkCurrent(client, startEpoch, current);
             Map<String, CatalogClient.Level> merged = new LinkedHashMap<>();
             for (Map.Entry<String, CatalogClient.Level> e : levels.entrySet()) {
                 if (before == null || !before.containsKey(e.getKey())) {
@@ -274,8 +287,9 @@ public final class SourceList implements AutoCloseable {
         }
     }
 
-    private void checkCurrent(CatalogClient client, int startEpoch) {
-        if (startEpoch != epoch || connection.get() != client) {
+    /** Call under the lock, with {@code now} read from the connection before taking it. */
+    private void checkCurrent(CatalogClient client, int startEpoch, CatalogClient now) {
+        if (startEpoch != epoch || now != client) {
             throw new IllegalStateException("The connection changed");
         }
     }
@@ -366,10 +380,10 @@ public final class SourceList implements AutoCloseable {
      * Starts polling the server's health and re-listing when {@code source_count}
      * or {@code catalog_generation} changes, so a catalog listed while the server
      * was still indexing fills itself in. Runs on a daemon thread (health checks
-     * block); idempotent.
+     * block); idempotent, and a no-op after {@link #close()}.
      */
     public synchronized void startWatch() {
-        if (watch != null && !watch.isCancelled()) {
+        if (closed || watch != null && !watch.isCancelled()) {
             return;
         }
         if (executor == null) {
@@ -393,6 +407,7 @@ public final class SourceList implements AutoCloseable {
     /** Stops the watcher and releases its thread. */
     @Override
     public synchronized void close() {
+        closed = true;
         stopWatch();
         if (ownsExecutor && executor != null) {
             executor.shutdownNow();
@@ -403,24 +418,34 @@ public final class SourceList implements AutoCloseable {
     private void pollQuietly() {
         try {
             poll();
-        } catch (RuntimeException e) { // an uncaught one would end the schedule
-            LOG.log(Level.WARNING, "Source watch: poll failed", e);
+        } catch (Throwable t) { // anything uncaught would silently end the schedule
+            LOG.log(Level.WARNING, "Source watch: poll failed", t);
         }
     }
 
     /**
      * One watcher tick: ask the server how it is and re-list if the count, the
      * catalog generation or the pending-registration figure moved. The first
-     * connected poll compares against what was listed at connect, so a listing
-     * taken mid-index is caught. The baseline advances only after a successful
+     * connected poll takes its baseline: the number of sources held (whole
+     * listing) or the server's own count (lazy, where only a few levels are held),
+     * and the server's generation then. A whole listing taken mid-index is thus
+     * caught; a lazy one is not, by design. The baseline advances only after a successful
      * re-list, so a failed one is retried on the next tick. Package-private so
      * tests can drive it without a clock.
      */
     void poll() {
+        synchronized (pollLock) {
+            pollOnce();
+        }
+    }
+
+    private void pollOnce() {
         CatalogClient client = connection.get();
         if (client == null) {
             synchronized (lock) {
                 lastCount = null; // disconnected: next connected poll starts a baseline
+                lastGeneration = null;
+                lastPending = 0;
             }
             return;
         }
@@ -454,7 +479,7 @@ public final class SourceList implements AutoCloseable {
             changed = !sameNumber(count, lastCount) || pending != lastPending
                     || !sameValue(generation, lastGeneration);
         }
-        if (changed && relist()) {
+        if (changed && relist(startEpoch)) {
             synchronized (lock) {
                 if (startEpoch == epoch) {
                     lastCount = count.longValue();
@@ -477,7 +502,7 @@ public final class SourceList implements AutoCloseable {
     }
 
     /** Re-lists and tells the listener; false when the re-list failed. */
-    private boolean relist() {
+    private boolean relist(int startEpoch) {
         Map<String, Map<String, Object>> listed;
         try {
             listed = refresh();
@@ -486,6 +511,9 @@ public final class SourceList implements AutoCloseable {
             return false;
         }
         LOG.info("Source watch: re-listed " + listed.size() + " sources");
+        if (currentEpoch() != startEpoch) {
+            return false; // cleared since: the listing is stale, say nothing
+        }
         Consumer<Map<String, Map<String, Object>>> callback = onChanged;
         if (callback != null) {
             try {

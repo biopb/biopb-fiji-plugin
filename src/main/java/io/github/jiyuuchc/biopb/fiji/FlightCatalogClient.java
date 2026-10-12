@@ -31,19 +31,23 @@ public final class FlightCatalogClient implements CatalogClient {
         } catch (RuntimeException e) {
             throw oldServer(e);
         }
-        try {
-            List<Folder> folders = new ArrayList<>();
-            for (CatalogChildren.Folder f : c.getFolders()) {
-                folders.add(new Folder(f.getName(), f.getKey()));
-            }
-            List<Source> sources = new ArrayList<>();
-            for (CatalogChildren.Source s : c.getSources()) {
-                sources.add(new Source(s.getName(), s.getSourceId()));
-            }
-            return new Level(c.getKey(), folders, sources, c.isTruncated());
-        } catch (NullPointerException malformed) { // the server's JSON left a list out
+        List<CatalogChildren.Folder> fs;
+        List<CatalogChildren.Source> ss;
+        try { // the SDK's getters throw NPE for a list the server's JSON left out
+            fs = c.getFolders();
+            ss = c.getSources();
+        } catch (NullPointerException missing) {
             return null;
         }
+        List<Folder> folders = new ArrayList<>();
+        for (CatalogChildren.Folder f : fs) {
+            folders.add(new Folder(f.getName(), f.getKey()));
+        }
+        List<Source> sources = new ArrayList<>();
+        for (CatalogChildren.Source s : ss) {
+            sources.add(new Source(s.getName(), s.getSourceId()));
+        }
+        return new Level(c.getKey(), folders, sources, c.isTruncated());
     }
 
     /**
@@ -100,6 +104,9 @@ public final class FlightCatalogClient implements CatalogClient {
                 copy.put(String.valueOf(e.getKey()), plain(e.getValue()));
             }
             return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof byte[]) {
+            return ((byte[]) value).clone();
         }
         return value;
     }

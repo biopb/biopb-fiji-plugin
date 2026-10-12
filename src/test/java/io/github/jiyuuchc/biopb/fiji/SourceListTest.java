@@ -38,6 +38,7 @@ public class SourceListTest {
         final List<String> queries = new ArrayList<>();
         final List<String> childKeys = new ArrayList<>();
         final java.util.concurrent.atomic.AtomicInteger healthCalls = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable queryHook; // runs inside a whole-listing query
         Runnable healthHook; // runs inside healthCheck, to interleave a call
 
         @Override
@@ -55,6 +56,9 @@ public class SourceListTest {
         @Override
         public List<Map<String, Object>> query(String sql) throws IOException {
             queries.add(sql);
+            if (queryHook != null && sql.contains("ORDER BY")) {
+                queryHook.run();
+            }
             if (sql.contains(" IN (")) {
                 Matcher m = Pattern.compile("'((?:[^']|'')*)'").matcher(sql.substring(sql.indexOf(" IN (")));
                 List<String> ids = new ArrayList<>();
@@ -183,14 +187,36 @@ public class SourceListTest {
     }
 
     @Test
-    public void aNullTopLevelIsTakenForAnOldServer() throws Exception {
+    public void aMalformedTopLevelIsAnErrorNotAnOldServer() throws Exception {
         FakeClient client = new FakeClient();
         client.levels = new HashMap<>(); // answers null for ""
         client.catalog = l("a");
         SourceList list = new SourceList(client);
+        try {
+            list.refresh();
+            fail("should have thrown");
+        } catch (IOException expected) {
+            // not latched as unsupported
+        }
+        client.levels = levels("", level(l(), l("a")));
         list.refresh();
-        assertFalse(list.isLazy());
-        assertEquals(set("a"), list.getSources().keySet());
+        assertTrue(list.isLazy());
+    }
+
+    @Test
+    public void aListingStaleAfterAClearIsNotDelivered() throws Exception {
+        FakeClient client = new FakeClient();
+        SourceList list = listing(client, "a");
+        client.health.add(h(2));
+        client.catalog = l("a", "b");
+        List<Object> delivered = new ArrayList<>();
+        list.setOnChanged(delivered::add);
+        client.healthHook = null;
+        // clear() lands while the re-list's query runs
+        FakeClient racing = client;
+        racing.queryHook = list::clear;
+        list.poll();
+        assertTrue(delivered.isEmpty());
     }
 
     @Test
