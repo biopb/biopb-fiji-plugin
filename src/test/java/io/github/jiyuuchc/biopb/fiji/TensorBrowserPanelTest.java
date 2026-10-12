@@ -14,11 +14,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import javax.swing.SwingUtilities;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.TreePath;
+import org.junit.After;
 import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,6 +35,8 @@ public class TensorBrowserPanelTest {
         final List<String> threads = new CopyOnWriteArrayList<>();
         final List<String> queries = new CopyOnWriteArrayList<>();
         final AtomicBoolean badFails = new AtomicBoolean(true);
+        final AtomicBoolean searchFails = new AtomicBoolean();
+        final AtomicInteger closed = new AtomicInteger();
 
         @Override
         public Level catalogChildren(String key, int limit) throws IOException {
@@ -51,8 +57,12 @@ public class TensorBrowserPanelTest {
         }
 
         @Override
-        public List<Map<String, Object>> query(String sql) {
+        public List<Map<String, Object>> query(String sql) throws IOException {
+            threads.add(Thread.currentThread().getName());
             queries.add(sql);
+            if (searchFails.get()) {
+                throw new IOException("down");
+            }
             Map<String, Object> d = TreeModelBuilderTest.source("s1", "/data/a/img.zarr",
                     TreeModelBuilderTest.tensor("s1/0", "uint16", 1, 64, 32));
             return new ArrayList<>(Collections.singletonList(d));
@@ -63,17 +73,52 @@ public class TensorBrowserPanelTest {
     }
 
     private Fake fake;
+    private Fake second;
     private TensorBrowserPanel panel;
+    private final List<Fake> opened = new CopyOnWriteArrayList<>();
+    private final List<String> connectThreads = new CopyOnWriteArrayList<>();
+    private volatile CountDownLatch gate; // holds a connect open when set
 
     @Before
     public void display() {
         Assume.assumeFalse(GraphicsEnvironment.isHeadless());
         fake = new Fake();
-        panel = new TensorBrowserPanel((host, port) -> new TensorBrowserPanel.Connection() {
-            @Override public CatalogClient catalog() { return fake; }
-            @Override public biopb.tensor.TensorFlightClient flight() { return null; }
-            @Override public void close() { }
+        second = new Fake();
+        panel = new TensorBrowserPanel((host, port) -> {
+            connectThreads.add(Thread.currentThread().getName());
+            CountDownLatch g = gate;
+            if (g != null) {
+                try {
+                    g.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    throw new IOException(e);
+                }
+            }
+            Fake f = opened.isEmpty() ? fake : second;
+            opened.add(f);
+            return new TensorBrowserPanel.Connection() {
+                @Override public CatalogClient catalog() { return f; }
+                @Override public biopb.tensor.TensorFlightClient flight() { return null; }
+                @Override public void close() { f.closed.incrementAndGet(); }
+            };
         }, "h:1");
+    }
+
+    @After
+    public void cleanup() throws Exception {
+        if (panel != null) {
+            edt(panel::dispose);
+        }
+    }
+
+    private void assertNothingOnEdt() {
+        List<String> all = new ArrayList<>(connectThreads);
+        all.addAll(fake.threads);
+        all.addAll(second.threads);
+        assertFalse(all.isEmpty());
+        for (String t : all) {
+            assertFalse("server call on the EDT: " + t, t.startsWith("AWT-EventQueue"));
+        }
     }
 
     private static void edt(Runnable r) throws Exception {
@@ -115,9 +160,7 @@ public class TensorBrowserPanelTest {
         edt(() -> panel.getTree().expandPath(new TreePath(child("a").getPath())));
         await(() -> TreeModelBuilder.nodeOf(child("a").getChildAt(0)).getKind() == TreeModelBuilder.Kind.SOURCE);
         assertTrue(panel.getTree().isExpanded(new TreePath(child("a").getPath())));
-        for (String t : fake.threads) {
-            assertFalse("read on the EDT: " + t, t.startsWith("AWT-EventQueue"));
-        }
+        assertNothingOnEdt();
     }
 
     @Test
@@ -142,24 +185,106 @@ public class TensorBrowserPanelTest {
         assertTrue(fake.queries.get(0).contains("%img%"));
         DefaultMutableTreeNode root = (DefaultMutableTreeNode) panel.getTree().getModel().getRoot();
         assertEquals("data/a", TreeModelBuilder.nodeOf(root.getChildAt(0)).getText());
+        assertNothingOnEdt();
         edt(() -> panel.getSearchField().setText(""));
         await(() -> child("a") != null);
     }
 
     @Test
+    public void failedSearchClearsTheStaleMatches() throws Exception {
+        connect();
+        edt(() -> panel.getSearchField().setText("img"));
+        await(() -> panel.getSearchStatusLabel().getText().contains("1 match"));
+        fake.searchFails.set(true);
+        edt(() -> panel.getSearchField().setText("imgx"));
+        await(() -> panel.getSearchStatusLabel().getText().contains("failed"));
+        assertEquals(0, ((DefaultMutableTreeNode) panel.getTree().getModel().getRoot()).getChildCount());
+    }
+
+    @Test
+    public void watcherRerunKeepsTheSearchViewOpenState() throws Exception {
+        connect();
+        edt(() -> panel.getSearchField().setText("img"));
+        await(() -> panel.getSearchStatusLabel().getText().contains("1 match"));
+        DefaultMutableTreeNode root = (DefaultMutableTreeNode) panel.getTree().getModel().getRoot();
+        TreePath folder = new TreePath(((DefaultMutableTreeNode) root.getChildAt(0)).getPath());
+        assertTrue(panel.getTree().isExpanded(folder));
+        edt(() -> panel.getTree().collapsePath(folder)); // the user closes it
+        int before = fake.queries.size();
+        edt(panel::simulateCatalogChange);
+        await(() -> fake.queries.size() > before && panel.getSearchStatusLabel().getText().contains("1 match"));
+        edt(() -> assertFalse(panel.getTree().isExpanded(new TreePath(
+                ((DefaultMutableTreeNode) ((DefaultMutableTreeNode) panel.getTree().getModel().getRoot())
+                        .getChildAt(0)).getPath()))));
+    }
+
+    @Test
+    public void reconnectAndDisposeCloseTheOldConnection() throws Exception {
+        connect();
+        edt(panel::connect);
+        await(() -> opened.size() == 2 && panel.getConnection() != null
+                && panel.getStatusLabel().getText().startsWith("Connected"));
+        await(() -> fake.closed.get() == 1);
+        assertEquals(0, second.closed.get());
+        edt(panel::dispose);
+        await(() -> second.closed.get() == 1);
+        assertNothingOnEdt();
+    }
+
+    @Test
+    public void staleConnectResultIsClosed() throws Exception {
+        gate = new CountDownLatch(1);
+        edt(panel::connect); // first, held open
+        edt(panel::connect); // second supersedes it
+        gate.countDown();
+        await(() -> opened.size() == 2 && panel.getConnection() != null);
+        await(() -> opened.get(0).closed.get() + opened.get(1).closed.get() == 1);
+    }
+
+    @Test
+    public void graftingLeavesOtherFoldersAlone() throws Exception {
+        connect();
+        TreePath bad = new TreePath(child("bad").getPath());
+        edt(() -> panel.getTree().expandPath(bad));
+        await(() -> TreeModelBuilder.FAILED_NOTE.equals(TreeModelBuilder.nodeOf(child("bad").getChildAt(0)).getText()));
+        DefaultMutableTreeNode badNode = child("bad");
+        edt(() -> panel.getTree().expandPath(new TreePath(child("a").getPath())));
+        await(() -> TreeModelBuilder.nodeOf(child("a").getChildAt(0)).getKind() == TreeModelBuilder.Kind.SOURCE);
+        edt(() -> {
+            assertTrue(panel.getTree().isExpanded(bad)); // untouched by a's graft
+            assertTrue(badNode == child("bad"));
+        });
+    }
+
+    @Test
     public void doubleClickAndMenuAskTheListener() throws Exception {
         connect();
+        edt(() -> panel.getTree().expandPath(new TreePath(child("a").getPath())));
+        await(() -> TreeModelBuilder.nodeOf(child("a").getChildAt(0)).getKind() == TreeModelBuilder.Kind.SOURCE);
         List<String> calls = new CopyOnWriteArrayList<>();
         panel.addListener(new TensorBrowserListener() {
             @Override public void openRequested(String arrayId, int level) { calls.add("open " + arrayId + " " + level); }
             @Override public void roisRequested(String arrayId) { calls.add("rois " + arrayId); }
         });
+        edt(() -> {
+            javax.swing.JTree t = panel.getTree();
+            t.setSize(400, 300);
+            java.awt.Rectangle r = t.getPathBounds(new TreePath(
+                    ((DefaultMutableTreeNode) child("a").getChildAt(0)).getPath()));
+            java.awt.Point p = new java.awt.Point(r.x + 5, r.y + r.height / 2);
+            for (java.awt.event.MouseListener ml : t.getMouseListeners()) {
+                if (!(ml.getClass().getName().contains("javax.swing"))) {
+                    ml.mouseClicked(new java.awt.event.MouseEvent(t, java.awt.event.MouseEvent.MOUSE_CLICKED,
+                            System.currentTimeMillis(), 0, p.x, p.y, 2, false, java.awt.event.MouseEvent.BUTTON1));
+                }
+            }
+        });
+        assertEquals(Arrays.asList("open s1/0 0"), calls);
         DefaultMutableTreeNode n = TreeModelBuilder.sourceNode(TreeModelBuilderTest.source("s1", "u",
                 TreeModelBuilderTest.tensor("s1/0", "uint8", 2)), "x");
         edt(() -> {
             javax.swing.JPopupMenu m = panel.menuFor(TreeModelBuilder.nodeOf(n));
             assertEquals(3, m.getComponentCount());
-            ((javax.swing.JMenuItem) m.getComponent(0)).doClick();
             ((javax.swing.JMenuItem) m.getComponent(2)).doClick();
         });
         assertEquals(Arrays.asList("open s1/0 0", "rois s1/0"), calls);

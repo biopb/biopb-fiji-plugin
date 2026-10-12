@@ -105,18 +105,38 @@ public class TensorBrowserPanel extends JPanel {
         return v == null || v.trim().isEmpty() ? DEFAULT_ADDRESS : v.trim();
     }
 
-    /** {@code [host, port]} of {@code host[:port]} (a leading scheme such as {@code grpc://} is dropped). */
+    /**
+     * {@code [host, port]} of {@code host[:port]}: a leading scheme (such as {@code grpc://}) and
+     * any path are dropped, and a bracketed IPv6 host ({@code [::1]:8815}) keeps its brackets.
+     */
     static Object[] parseAddress(String address) {
-        String a = address.trim().replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceAll("/+$", "");
-        int colon = a.lastIndexOf(':');
+        String a = address.trim().replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "");
+        int slash = a.indexOf('/');
+        a = slash < 0 ? a : a.substring(0, slash);
         if (a.isEmpty()) {
             throw new IllegalArgumentException("Enter host:port");
         }
-        if (colon < 0) {
-            return new Object[] {a, DEFAULT_PORT};
+        String host = a;
+        String port = null;
+        if (a.startsWith("[")) {
+            int close = a.indexOf(']');
+            if (close < 0 || close == 1 || close + 1 < a.length() && a.charAt(close + 1) != ':') {
+                throw new IllegalArgumentException("Bad address '" + address + "'");
+            }
+            host = a.substring(0, close + 1);
+            port = close + 1 < a.length() ? a.substring(close + 2) : null;
+        } else if (a.indexOf(':') >= 0 && a.indexOf(':') == a.lastIndexOf(':')) {
+            host = a.substring(0, a.indexOf(':'));
+            port = a.substring(a.indexOf(':') + 1);
+        } // else a bare name, or a bare IPv6 address: the default port
+        if (host.isEmpty()) {
+            throw new IllegalArgumentException("Enter host:port");
+        }
+        if (port == null) {
+            return new Object[] {host, DEFAULT_PORT};
         }
         try {
-            return new Object[] {a.substring(0, colon), Integer.parseInt(a.substring(colon + 1))};
+            return new Object[] {host, Integer.parseInt(port)};
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Bad port in '" + address + "'");
         }
@@ -136,6 +156,9 @@ public class TensorBrowserPanel extends JPanel {
 
     // EDT-only state.
     private Connection connection;
+    private String connectionName = "";
+    private String searchQuery = ""; // the query the search view is for (or being fetched for)
+    private final Set<String> openSources = new HashSet<>(); // multi-tensor sources open
     private SourceList list;
     private int connectGen;
     private int searchGen;
@@ -250,12 +273,12 @@ public class TensorBrowserPanel extends JPanel {
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
                 Connection c = factory.connect(host, port);
-                SourceList l = new SourceList(c.catalog());
+                SourceList l = null;
                 try {
+                    l = new SourceList(c.catalog());
                     l.refresh();
                 } catch (Exception | Error e) {
-                    l.close();
-                    c.close();
+                    release(c, l); // the connection just opened must not leak
                     throw e;
                 }
                 return new Object[] {c, l};
@@ -269,7 +292,9 @@ public class TensorBrowserPanel extends JPanel {
                     if (gen == connectGen) {
                         connectButton.setEnabled(true);
                         Throwable cause = e.getCause() == null ? e : e.getCause();
-                        status.setText("Connection failed: " + cause.getMessage());
+                        status.setText(connection == null ? "Connection failed: " + cause.getMessage()
+                                : "Connection to " + host + ":" + port + " failed (" + cause.getMessage()
+                                        + "); still connected to " + connectionName);
                     }
                     return;
                 }
@@ -298,22 +323,35 @@ public class TensorBrowserPanel extends JPanel {
     // --- connection ----------------------------------------------------------
 
     private static void release(Connection c, SourceList l) {
-        if (l != null) {
-            l.close();
+        if (l == null && c == null) {
+            return;
         }
-        if (c != null) { // closing a channel can block; keep it off the EDT
-            Thread t = new Thread(c::close, "biopb-close");
-            t.setDaemon(true);
-            t.start();
-        }
+        // Closing stops the watcher's executor and shuts a channel down, either of
+        // which can wait; neither belongs on the EDT.
+        Thread t = new Thread(() -> {
+            try {
+                if (l != null) {
+                    l.close();
+                }
+            } finally {
+                if (c != null) {
+                    c.close();
+                }
+            }
+        }, "biopb-close");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void install(Connection c, SourceList l, String name) {
         release(connection, list);
         connection = c;
+        connectionName = name;
         list = l;
         searchGen++;
         searchResult = null;
+        searchQuery = "";
+        openSources.clear();
         expanded.clear();
         searchOpen = new HashSet<>();
         loading.clear();
@@ -326,8 +364,12 @@ public class TensorBrowserPanel extends JPanel {
         publishOpen();
         l.setOpenKeys(() -> openSnapshot);
         l.setOnChanged(sources -> SwingUtilities.invokeLater(() -> {
-            if (list == l) {
-                applyFilter();
+            if (list == l) { // the catalog changed: redraw, or re-run the active search in place
+                if (searchQuery.isEmpty()) {
+                    rebuild();
+                } else {
+                    runSearch(searchQuery, false);
+                }
             }
         }));
         l.startWatch();
@@ -390,7 +432,9 @@ public class TensorBrowserPanel extends JPanel {
 
     private void restoreExpansion(DefaultMutableTreeNode under) {
         TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(under);
-        if (n != null && n.getKind() == TreeModelBuilder.Kind.FOLDER && openSet().contains(n.getKey())) {
+        if (n != null && (n.getKind() == TreeModelBuilder.Kind.FOLDER && openSet().contains(n.getKey())
+                || n.getKind() == TreeModelBuilder.Kind.SOURCE && under.getChildCount() > 0
+                        && openSources.contains(n.getKey()))) {
             tree.expandPath(new TreePath(under.getPath()));
         }
         for (int i = 0; i < under.getChildCount(); i++) {
@@ -421,6 +465,9 @@ public class TensorBrowserPanel extends JPanel {
 
     private void onExpanded(TreePath path) {
         TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(path.getLastPathComponent());
+        if (n != null && n.getKind() == TreeModelBuilder.Kind.SOURCE) {
+            openSources.add(n.getKey());
+        }
         if (n == null || n.getKind() != TreeModelBuilder.Kind.FOLDER) {
             return;
         }
@@ -437,7 +484,13 @@ public class TensorBrowserPanel extends JPanel {
 
     private void onCollapsed(TreePath path) {
         TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(path.getLastPathComponent());
-        if (rebuilding || n == null || n.getKind() != TreeModelBuilder.Kind.FOLDER) {
+        if (rebuilding || n == null) {
+            return;
+        }
+        if (n.getKind() == TreeModelBuilder.Kind.SOURCE) {
+            openSources.remove(n.getKey());
+        }
+        if (n.getKind() != TreeModelBuilder.Kind.FOLDER) {
             return;
         }
         openSet().remove(n.getKey());
@@ -501,20 +554,32 @@ public class TensorBrowserPanel extends JPanel {
 
     /** Applies the search box: runs the search, or restores the folder tree when it is empty. */
     private void applyFilter() {
-        int gen = ++searchGen;
-        SourceList l = list;
-        Connection c = connection;
         String q = search.getText().trim().toLowerCase();
-        if (l == null) {
-            return;
+        if (list == null || q.equals(searchQuery)) {
+            return; // nothing changed; a search already out for this query is left to land
         }
+        searchQuery = q;
         if (q.isEmpty()) {
+            searchGen++; // an answer still in flight is no longer wanted
             searchResult = null;
             searchStatus.setText(" ");
             rebuild();
-            return;
+        } else {
+            runSearch(q, true);
         }
-        searchStatus.setText("Server-side search • Searching…");
+    }
+
+    /**
+     * Asks the server for the matches of {@code q}, superseding any search in flight.
+     *
+     * @param fresh a new query: its top folders open. A re-run for a changed catalog
+     *        keeps what the user has open.
+     */
+    private void runSearch(String q, boolean fresh) {
+        int gen = ++searchGen;
+        SourceList l = list;
+        Connection c = connection;
+        searchStatus.setText("Server-side search \u2022 Searching\u2026");
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
                 CatalogClient client = c.catalog();
@@ -538,18 +603,21 @@ public class TensorBrowserPanel extends JPanel {
                 try {
                     Object[] r = get();
                     searchResult = (Map<String, Map<String, Object>>) r[0];
-                    searchStatus.setText("Server-side search • " + searchResult.size() + " match"
+                    searchStatus.setText("Server-side search \u2022 " + searchResult.size() + " match"
                             + (searchResult.size() == 1 ? "" : "es")
-                            + ((Boolean) r[1] ? " • first " + TreeModelBuilder.SEARCH_LIMIT
+                            + ((Boolean) r[1] ? " \u2022 first " + TreeModelBuilder.SEARCH_LIMIT
                                     + " shown, refine the search" : ""));
-                    searchOpen = new HashSet<>();
-                    searchOpen.addAll(TreeModelBuilder.topFolders(
-                            TreeModelBuilder.buildPaths(searchResult.values()), 1));
-                    rebuild();
+                    if (fresh) {
+                        searchOpen = new HashSet<>(TreeModelBuilder.topFolders(
+                                TreeModelBuilder.buildPaths(searchResult.values()), 1));
+                    }
                 } catch (Exception e) {
                     LOG.log(Level.FINE, "Search failed", e);
-                    searchStatus.setText("Search failed • the server did not answer");
+                    // Not the previous query's matches under this query's name.
+                    searchResult = new LinkedHashMap<>();
+                    searchStatus.setText("Search failed \u2022 the server did not answer");
                 }
+                rebuild();
             }
         }.execute();
     }
@@ -665,6 +733,15 @@ public class TensorBrowserPanel extends JPanel {
     }
 
     // --- test access ---------------------------------------------------------
+
+    /** What the watcher's change callback does, without waiting for a poll. */
+    void simulateCatalogChange() {
+        if (searchQuery.isEmpty()) {
+            rebuild();
+        } else {
+            runSearch(searchQuery, false);
+        }
+    }
 
     JTree getTree() { return tree; }
     JTextField getAddressField() { return address; }

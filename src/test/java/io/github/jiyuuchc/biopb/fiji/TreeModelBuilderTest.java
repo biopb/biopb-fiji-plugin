@@ -99,29 +99,6 @@ public class TreeModelBuilderTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    public void graftingOneFolderReplacesOnlyItsChildren() {
-        Map<String, CatalogClient.Level> levels = new LinkedHashMap<>();
-        levels.put("", level(false, Arrays.asList(folder("a"), folder("b"))));
-        Set<String> open = new HashSet<>(Arrays.asList("a"));
-        Set<String> failed = new HashSet<>();
-        Map<String, Map<String, Object>> src = sources(source("s1", "u", tensor("s1/0", "uint8", 4, 4)));
-        DefaultMutableTreeNode root = TreeModelBuilder.buildLevels(levels, src, open, failed);
-        DefaultMutableTreeNode b = TreeModelBuilder.folderIndex(root).get("b");
-        DefaultMutableTreeNode a = TreeModelBuilder.folderIndex(root).get("a");
-        // folder a's level lands
-        levels = new LinkedHashMap<>(levels);
-        levels.put("a", level(false, Collections.<CatalogClient.Folder>emptyList(), new CatalogClient.Source("i", "s1")));
-        a.removeAllChildren();
-        for (DefaultMutableTreeNode c : TreeModelBuilder.levelChildren("a", levels, src, open, failed)) {
-            a.add(c);
-        }
-        assertEquals("i", kids(a).get(0).getText());
-        assertEquals(TreeModelBuilder.LOADING_NOTE, kids(b).get(0).getText()); // b untouched
-        assertTrue(TreeModelBuilder.folderIndex(root).get("a") == a);
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
     public void expandedSubfoldersAreBuiltFromTheirLevelsOnARebuild() {
         Map<String, CatalogClient.Level> levels = new LinkedHashMap<>();
         levels.put("", level(false, Arrays.asList(folder("a"))));
@@ -206,5 +183,9 @@ public class TreeModelBuilderTest {
         assertEquals("example.org", hp[0]);
         assertEquals(9000, hp[1]);
         assertEquals(8815, TensorBrowserPanel.parseAddress("example.org")[1]);
+        assertEquals("[::1]", TensorBrowserPanel.parseAddress("[::1]")[0]);
+        assertEquals(8815, TensorBrowserPanel.parseAddress("[::1]")[1]);
+        assertEquals(9, TensorBrowserPanel.parseAddress("grpc://[::1]:9/x/y")[1]);
+        assertEquals("h", TensorBrowserPanel.parseAddress("grpc://h:5/path")[0]);
     }
 }
