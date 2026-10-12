@@ -16,8 +16,13 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.gui.EllipseRoi;
 import ij.gui.PointRoi;
+import ij.gui.PolygonRoi;
 import ij.gui.Roi;
+import ij.plugin.frame.RoiManager;
+import java.awt.GraphicsEnvironment;
+import java.awt.geom.Rectangle2D;
 import java.util.Arrays;
+import org.junit.Assume;
 import org.junit.Test;
 
 public class RoiLoaderTest {
@@ -34,6 +39,11 @@ public class RoiLoaderTest {
                 Rectangle.newBuilder().setTopLeft(pt(x0, y0)).setBottomRight(pt(x1, y1)));
     }
 
+    private static ROI.Builder ell(double cx, double cy, double rx, double ry, double rot) {
+        return ROI.newBuilder().setEllipse(Ellipse.newBuilder().setCenter(pt(cx, cy))
+                .setRadius(pt(rx, ry)).setRotation((float) rot));
+    }
+
     private static final PlaneMap TCZ = PlaneMap.fromDimLabels(Arrays.asList("t", "c", "z", "y", "x"));
 
     private static ImagePlus stack(int c, int z, int t) {
@@ -43,19 +53,29 @@ public class RoiLoaderTest {
     private static RoiLoader.Result load(ImagePlus imp, double sx, double sy, boolean trunc,
             RoiAnnotation... as) throws Exception {
         RoiListResult r = RoiListResult.newBuilder().addAllRois(Arrays.asList(as)).setTruncated(trunc).build();
-        return RoiLoader.load((a, s) -> r, "arr", "s", imp, TCZ, sx, sy, false);
+        return RoiLoader.load((a, s) -> r, "arr", "s", imp, TCZ, sx, sy);
+    }
+
+    private static void assertBounds(Roi r, double cx, double cy, double w, double h, double tol) {
+        Rectangle2D b = r.getFloatPolygon().getFloatBounds(); // true outline, not pixel-snapped
+        assertEquals(cx, b.getCenterX(), tol);
+        assertEquals(cy, b.getCenterY(), tol);
+        assertEquals(w, b.getWidth(), tol);
+        assertEquals(h, b.getHeight(), tol);
     }
 
     @Test
-    public void rectangleScaledAndMetadata() throws Exception {
+    public void rectangleScaledPixelCentreAndMetadata() throws Exception {
         ImagePlus imp = stack(1, 1, 1);
         RoiAnnotation a = ann("id1", rect(20, 40, 60, 80)).setLabel("cell").setPropsJson("{}").build();
         RoiLoader.Result res = load(imp, 2, 4, false, a);
         assertEquals(1, res.loaded);
+        assertNull(imp.getOverlay()); // load does not touch the image
+        assertEquals(1, res.applyTo(imp, false));
         Roi r = imp.getOverlay().get(0);
-        java.awt.geom.Rectangle2D b = r.getFloatBounds();
-        assertEquals(10, b.getX(), 1e-6);
-        assertEquals(10, b.getY(), 1e-6);
+        Rectangle2D b = r.getFloatBounds();
+        assertEquals(10.25, b.getX(), 1e-6);
+        assertEquals(10.125, b.getY(), 1e-6);
         assertEquals(20, b.getWidth(), 1e-6);
         assertEquals(10, b.getHeight(), 1e-6);
         assertEquals("cell", r.getName());
@@ -71,35 +91,47 @@ public class RoiLoaderTest {
                 .addPoints(pt(0, 0)).addPoints(pt(20, 0)).addPoints(pt(20, 10))).build(), 2, 2);
         assertEquals(Roi.POLYGON, pg.getType());
         assertEquals(10, pg.getFloatBounds().getWidth(), 1e-6);
+        assertEquals(0.25, pg.getFloatBounds().getX(), 1e-6);
         Roi pl = RoiConverter.toRoi(ROI.newBuilder().setPolyline(Polyline.newBuilder()
-                .addPoints(pt(0, 0)).addPoints(pt(8, 8)).setWidth(4)).build(), 2, 2);
+                .addPoints(pt(0, 0)).addPoints(pt(8, 8)).setWidth(8)).build(), 2, 2);
         assertEquals(Roi.POLYLINE, pl.getType());
-        assertEquals(2, pl.getStrokeWidth(), 1e-6);
+        assertEquals(4, pl.getStrokeWidth(), 1e-6);
+        Roi thin = RoiConverter.toRoi(ROI.newBuilder().setPolyline(Polyline.newBuilder()
+                .addPoints(pt(0, 0)).addPoints(pt(8, 8)).setWidth(1)).build(), 4, 4);
+        assertEquals(1, thin.getStrokeWidth(), 1e-6);
+        Roi zero = RoiConverter.toRoi(ROI.newBuilder().setPolyline(Polyline.newBuilder()
+                .addPoints(pt(0, 0)).addPoints(pt(8, 8))).build(), 1, 1);
+        assertTrue(zero.getStrokeWidth() <= 1);
         Roi p = RoiConverter.toRoi(ROI.newBuilder().setPoint(pt(10, 6)).build(), 2, 2);
         assertTrue(p instanceof PointRoi);
-        assertEquals(5, p.getFloatBounds().getX(), 1e-6);
-        assertEquals(3, p.getFloatBounds().getY(), 1e-6);
+        assertEquals(5.25, p.getFloatPolygon().xpoints[0], 1e-6);
+        assertEquals(3.25, p.getFloatPolygon().ypoints[0], 1e-6);
     }
 
     @Test
-    public void ellipseRotation() {
-        ROI.Builder g = ROI.newBuilder().setEllipse(Ellipse.newBuilder()
-                .setCenter(pt(20, 20)).setRadius(pt(10, 4)));
-        Roi e = RoiConverter.toRoi(g.build(), 1, 1);
+    public void ellipseGeometry() {
+        double h = Math.sqrt(58); // half extent of rx=10, ry=4 rotated 45 degrees
+        Roi e = RoiConverter.toRoi(ell(20, 20, 10, 4, 0).build(), 1, 1);
         assertTrue(e instanceof EllipseRoi);
-        java.awt.geom.Rectangle2D b = e.getFloatBounds();
-        assertEquals(20, b.getWidth(), 0.5);
-        assertEquals(8, b.getHeight(), 0.5);
-        // rotated by 90 degrees: width and height swap
-        g.getEllipseBuilder().setRotation((float) (Math.PI / 2));
-        b = RoiConverter.toRoi(g.build(), 1, 1).getFloatBounds();
-        assertEquals(8, b.getWidth(), 0.5);
-        assertEquals(20, b.getHeight(), 0.5);
-        // radius.y > radius.x, no rotation: tall ellipse
-        g = ROI.newBuilder().setEllipse(Ellipse.newBuilder().setCenter(pt(20, 20)).setRadius(pt(4, 10)));
-        b = RoiConverter.toRoi(g.build(), 1, 1).getFloatBounds();
-        assertEquals(8, b.getWidth(), 0.5);
-        assertEquals(20, b.getHeight(), 0.5);
+        assertBounds(e, 20.5, 20.5, 20, 8, 0.3);
+        e = RoiConverter.toRoi(ell(20, 20, 10, 4, Math.PI / 4).build(), 1, 1);
+        assertBounds(e, 20.5, 20.5, 2 * h, 2 * h, 0.3);
+        // offset centre, level scale 2
+        e = RoiConverter.toRoi(ell(30, 10, 4, 10, 0).build(), 2, 2);
+        assertBounds(e, 15.25, 5.25, 4, 10, 0.3);
+    }
+
+    @Test
+    public void ellipseAnisotropicScale() {
+        double h = Math.sqrt(58);
+        Roi e = RoiConverter.toRoi(ell(20, 20, 10, 4, Math.PI / 4).build(), 2, 1);
+        assertTrue(e instanceof PolygonRoi);
+        assertTrue(e.getFloatPolygon().npoints >= 72);
+        assertBounds(e, 10.25, 20.5, 2 * h / 2, 2 * h, 0.1);
+        e = RoiConverter.toRoi(ell(20, 20, 10, 4, 0).build(), 2, 1);
+        assertBounds(e, 10.25, 20.5, 10, 8, 0.1);
+        e = RoiConverter.toRoi(ell(20, 20, 10, 4, 0).build(), 1, 4);
+        assertBounds(e, 20.5, 5.125, 20, 2, 0.1);
     }
 
     @Test
@@ -109,13 +141,15 @@ public class RoiLoaderTest {
         // axes: 0=t 1=c 2=z
         RoiAnnotation pinned = ann("p", rect(1, 1, 5, 5)).putPlane(0, 2).putPlane(1, 1).putPlane(2, 3).build();
         RoiAnnotation zOnly = ann("z", rect(1, 1, 5, 5)).putPlane(2, 0).build();
-        RoiAnnotation yPin = ann("y", rect(1, 1, 5, 5)).putPlane(3, 7).build(); // not c/z/t: ignored
+        RoiAnnotation yPin = ann("y", rect(1, 1, 5, 5)).putPlane(3, 7).build(); // not c/z/t
+        RoiAnnotation unknown = ann("k", rect(1, 1, 5, 5)).putPlane(9, 0).build();
         RoiAnnotation outside = ann("o", rect(1, 1, 5, 5)).putPlane(0, 5).build();
-        RoiLoader.Result res = load(imp, 1, 1, false, unpinned, pinned, zOnly, yPin, outside);
-        assertEquals(4, res.loaded);
-        assertEquals(1, res.skipped);
+        RoiLoader.Result res = load(imp, 1, 1, false, unpinned, pinned, zOnly, yPin, unknown, outside);
+        assertEquals(3, res.loaded);
+        assertEquals(3, res.skipped);
         assertEquals(Integer.valueOf(1), res.skippedReasons.get("plane outside image"));
-        Roi[] r = imp.getOverlay().toArray();
+        assertEquals(Integer.valueOf(2), res.skippedReasons.get("pinned axis is not t/c/z"));
+        Roi[] r = res.rois.toArray(new Roi[0]);
         assertEquals(0, r[0].getPosition());
         assertEquals(2, r[1].getCPosition());
         assertEquals(4, r[1].getZPosition());
@@ -123,7 +157,18 @@ public class RoiLoaderTest {
         assertEquals(0, r[2].getCPosition());
         assertEquals(1, r[2].getZPosition());
         assertEquals(0, r[2].getTPosition());
-        assertEquals(0, r[3].getPosition() + r[3].getCPosition() + r[3].getZPosition() + r[3].getTPosition());
+    }
+
+    @Test
+    public void nonHyperstackUsesStackIndex() throws Exception {
+        ImagePlus imp = IJ.createImage("x", "8-bit", 64, 64, 4);
+        assertFalse(imp.isHyperStack());
+        RoiLoader.Result res = load(imp, 1, 1, false,
+                ann("a", rect(1, 1, 5, 5)).putPlane(2, 2).build(),
+                ann("b", rect(1, 1, 5, 5)).putPlane(2, 4).build());
+        assertEquals(1, res.loaded);
+        assertEquals(3, res.rois.get(0).getPosition());
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("plane outside image"));
     }
 
     @Test
@@ -142,23 +187,71 @@ public class RoiLoaderTest {
         try {
             RoiConverter.toRoi(mask.getRoi(), 1, 1);
             fail();
-        } catch (UnsupportedOperationException e) {
-            assertTrue(e.getMessage().contains("supported: rectangle"));
+        } catch (RoiConverter.SkipException e) {
+            assertEquals("unsupported ROI shape 'mask'", e.reason());
         }
     }
 
     @Test
-    public void keepsExistingOverlayAndPassesArguments() throws Exception {
+    public void malformedGeometryIsSkipped() throws Exception {
         ImagePlus imp = stack(1, 1, 1);
-        load(imp, 1, 1, false, ann("a", rect(0, 0, 3, 3)).build());
+        RoiAnnotation poly2 = ann("a", ROI.newBuilder().setPolygon(Polygon.newBuilder()
+                .addPoints(pt(0, 0)).addPoints(pt(5, 5)))).build();
+        RoiAnnotation line1 = ann("b", ROI.newBuilder().setPolyline(Polyline.newBuilder()
+                .addPoints(pt(0, 0)))).build();
+        RoiAnnotation nan = ann("c", ROI.newBuilder().setPoint(pt(Double.NaN, 1))).build();
+        RoiAnnotation nanRect = ann("d", rect(0, Double.NaN, 3, 3)).build();
+        RoiAnnotation negRadius = ann("e", ell(5, 5, -1, 2, 0)).build();
+        RoiLoader.Result res = load(imp, 1, 1, false, poly2, line1, nan, nanRect, negRadius,
+                ann("ok", rect(0, 0, 3, 3)).build());
+        assertEquals(1, res.loaded);
+        assertEquals(5, res.skipped);
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("malformed polygon geometry"));
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("malformed polyline geometry"));
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("malformed point geometry"));
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("malformed rectangle geometry"));
+        assertEquals(Integer.valueOf(1), res.skippedReasons.get("malformed ellipse geometry"));
+    }
+
+    @Test
+    public void passesArgumentsAndDedupesOnApply() throws Exception {
+        ImagePlus imp = stack(1, 1, 1);
         String[] seen = new String[2];
-        RoiLoader.load((a, s) -> {
+        RoiSource src = (a, s) -> {
             seen[0] = a;
             seen[1] = s;
-            return RoiListResult.newBuilder().addRois(ann("b", rect(0, 0, 2, 2))).build();
-        }, "arrX", "setY", imp, TCZ, 1, 1, false);
+            return RoiListResult.newBuilder().addRois(ann("b", rect(0, 0, 2, 2)))
+                    .addRois(ann("c", rect(0, 0, 2, 2))).build();
+        };
+        RoiLoader.Result res = RoiLoader.load(src, "arrX", "setY", imp, TCZ, 1, 1);
         assertEquals("arrX", seen[0]);
         assertEquals("setY", seen[1]);
+        assertEquals(2, res.applyTo(imp, false));
+        assertEquals(0, res.applyTo(imp, false)); // same ids and set: no duplicates
         assertEquals(2, imp.getOverlay().size());
+        // same id in another set is a different annotation
+        RoiLoader.Result other = load(imp, 1, 1, false,
+                ann("b", rect(0, 0, 2, 2)).setSetName("other").build());
+        assertEquals(1, other.applyTo(imp, false));
+        assertEquals(3, imp.getOverlay().size());
+    }
+
+    @Test
+    public void roiManagerPath() throws Exception {
+        Assume.assumeFalse(GraphicsEnvironment.isHeadless());
+        ImagePlus imp = stack(1, 1, 1);
+        RoiLoader.Result res = load(imp, 1, 1, false, ann("a", rect(0, 0, 3, 3)).build());
+        try {
+            assertEquals(1, res.applyTo(imp, true));
+            RoiManager inst = RoiManager.getInstance2();
+            assertNotNull(inst);
+            assertTrue(inst.getCount() >= 1);
+        } finally {
+            RoiManager inst = RoiManager.getInstance2();
+            if (inst != null) {
+                inst.reset();
+                inst.close();
+            }
+        }
     }
 }

@@ -10,14 +10,17 @@ import ij.plugin.frame.RoiManager;
 import java.awt.GraphicsEnvironment;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * Loads a tensor's ROI annotations onto an open {@link ImagePlus}.
- *
- * <p>{@code load} blocks on the network: call it from a worker thread, never the EDT.
+ * Loads a tensor's ROI annotations for an open {@link ImagePlus}, in two steps:
+ * {@link #load} fetches and converts (blocking, no UI mutation, safe on a worker thread) and
+ * {@link Result#applyTo} puts the ROIs on the image (EDT only).
  */
 public final class RoiLoader {
     private RoiLoader() {
@@ -25,44 +28,88 @@ public final class RoiLoader {
 
     /** Outcome of a load. */
     public static final class Result {
-        /** ROIs added. */
+        /** ROIs converted. */
         public final int loaded;
-        /** Annotations not added. */
+        /** Annotations not converted. */
         public final int skipped;
         /** Skip counts by reason (e.g. {@code unsupported ROI shape 'mask'}). */
         public final Map<String, Integer> skippedReasons;
         /** True when the server's per-tensor cap clipped the set (the SDK has no paging). */
         public final boolean truncated;
-        /** The ROIs added. */
+        /** The converted ROIs. */
         public final List<Roi> rois;
 
         Result(List<Roi> rois, Map<String, Integer> reasons, int skipped, boolean truncated) {
-            this.rois = rois;
+            this.rois = Collections.unmodifiableList(rois);
             this.loaded = rois.size();
             this.skipped = skipped;
             this.skippedReasons = reasons;
             this.truncated = truncated;
         }
+
+        private static String key(Roi r) {
+            String id = r.getProperty(RoiConverter.PROP_ROI_ID);
+            return id == null ? null : id + "\0" + r.getProperty(RoiConverter.PROP_SET_NAME);
+        }
+
+        /**
+         * Add the ROIs to {@code imp}'s overlay (existing ROIs kept), skipping any whose
+         * ({@code biopb.roi_id}, {@code biopb.set_name}) is already in the overlay. Also adds
+         * them to the ROI Manager when requested and not headless. <b>EDT only.</b>
+         *
+         * @return the number of ROIs added
+         */
+        public int applyTo(ImagePlus imp, boolean useRoiManager) {
+            Overlay ov = imp.getOverlay() != null ? imp.getOverlay() : new Overlay();
+            Set<String> have = new HashSet<>();
+            for (Roi r : ov.toArray()) {
+                String k = key(r);
+                if (k != null) {
+                    have.add(k);
+                }
+            }
+            List<Roi> added = new ArrayList<>();
+            for (Roi r : rois) {
+                String k = key(r);
+                if (k == null || have.add(k)) {
+                    ov.add((Roi) r.clone());
+                    added.add(r);
+                }
+            }
+            if (added.isEmpty()) {
+                return 0;
+            }
+            imp.setOverlay(ov);
+            if (useRoiManager && !GraphicsEnvironment.isHeadless()) {
+                RoiManager rm = RoiManager.getInstance2() != null ? RoiManager.getInstance2()
+                        : new RoiManager();
+                for (Roi r : added) {
+                    rm.addRoi((Roi) r.clone());
+                }
+            }
+            return added.size();
+        }
     }
 
-    /** Against a live client, overlay only (no ROI Manager). */
+    /** Against a live client. */
     public static Result load(TensorFlightClient client, String arrayId, String setName,
             ImagePlus imp, PlaneMap planes, double sx, double sy) throws IOException {
-        return load(RoiSource.of(client), arrayId, setName, imp, planes, sx, sy, false);
+        return load(RoiSource.of(client), arrayId, setName, imp, planes, sx, sy);
     }
 
     /**
-     * Fetch, convert and add annotations to {@code imp}'s overlay (existing overlay ROIs are kept).
+     * Fetch and convert annotations; does not modify {@code imp} (only reads its dimensions).
+     * Blocking: call from a worker thread.
      *
      * @param setName set to read; empty for the client-owned sets
-     * @param planes how tensor axes map to c/z/t, see {@link PlaneMap}; ROIs pinned outside the
-     *        image are skipped, unpinned ones get position 0 (all planes)
-     * @param sx level-0 to view scale factor in x (coordinates are divided by it)
+     * @param planes how tensor axes map to c/z/t, see {@link PlaneMap}. ROIs pinned outside the
+     *        image or on a non-c/z/t axis are skipped; unpinned ones show on all planes. On a
+     *        non-hyperstack the pin becomes the stack index.
+     * @param sx level-0 to view scale factor in x (see {@link RoiConverter} for the mapping)
      * @param sy same for y
-     * @param useRoiManager also add to the ROI Manager, when not headless
      */
     public static Result load(RoiSource source, String arrayId, String setName, ImagePlus imp,
-            PlaneMap planes, double sx, double sy, boolean useRoiManager) throws IOException {
+            PlaneMap planes, double sx, double sy) throws IOException {
         RoiListResult res = source.list(arrayId, setName);
         List<Roi> rois = new ArrayList<>();
         Map<String, Integer> reasons = new TreeMap<>();
@@ -70,34 +117,16 @@ public final class RoiLoader {
         for (RoiAnnotation a : res.getRoisList()) {
             try {
                 Roi r = RoiConverter.toRoi(a, sx, sy);
-                int[] pos = planes.position(a.getPlaneMap(), imp.getNChannels(), imp.getNSlices(),
-                        imp.getNFrames());
-                if (pos == null) {
-                    skipped++;
-                    reasons.merge("plane outside image", 1, Integer::sum);
-                    continue;
-                }
-                if (pos[0] != 0 || pos[1] != 0 || pos[2] != 0) {
-                    r.setPosition(pos[0], pos[1], pos[2]);
-                }
+                PlaneMap.place(r, planes.position(a.getPlaneMap(), imp.getNChannels(),
+                        imp.getNSlices(), imp.getNFrames()), imp);
                 rois.add(r);
-            } catch (UnsupportedOperationException e) {
+            } catch (RoiConverter.SkipException e) {
                 skipped++;
-                reasons.merge(e.getMessage().replaceAll("; supported:.*", ""), 1, Integer::sum);
-            }
-        }
-        if (!rois.isEmpty()) {
-            Overlay ov = imp.getOverlay() != null ? imp.getOverlay() : new Overlay();
-            for (Roi r : rois) {
-                ov.add(r);
-            }
-            imp.setOverlay(ov);
-            if (useRoiManager && !GraphicsEnvironment.isHeadless()) {
-                RoiManager rm = RoiManager.getInstance2() != null ? RoiManager.getInstance2()
-                        : new RoiManager();
-                for (Roi r : rois) {
-                    rm.addRoi((Roi) r.clone());
-                }
+                reasons.merge(e.reason(), 1, Integer::sum);
+            } catch (RuntimeException e) {
+                skipped++;
+                reasons.merge("malformed annotation (" + e.getClass().getSimpleName() + ")", 1,
+                        Integer::sum);
             }
         }
         return new Result(rois, reasons, skipped, res.getTruncated());
