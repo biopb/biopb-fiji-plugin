@@ -99,6 +99,11 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
+      <groupId>net.imagej</groupId>
+      <artifactId>ij</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>net.imglib2</groupId>
       <artifactId>imglib2</artifactId>
       <scope>provided</scope>
