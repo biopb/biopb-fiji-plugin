@@ -14,6 +14,9 @@ public final class MetadataFormat {
     public static final String NONE = "No metadata available";
     /** Most characters of metadata text shown; a text area cannot sensibly hold more. */
     public static final int MAX_CHARS = 200_000;
+    /** Deepest nesting written; below it a value is shown as an ellipsis. */
+    static final int MAX_DEPTH = 64;
+    private static final String CUT_NOTE = "… more lines not shown";
 
     private MetadataFormat() { }
 
@@ -70,36 +73,31 @@ public final class MetadataFormat {
 
     /** The text of the dialog's metadata box: filtered, indented by two spaces, or {@link #NONE}. */
     public static String toText(Map<String, ?> metadata) {
+        return toText(metadata, MAX_CHARS);
+    }
+
+    /** As {@link #toText(Map)}, writing no more than about {@code max} characters (it stops, it does not build it all). */
+    static String toText(Map<String, ?> metadata, int max) {
         Map<String, Object> filtered = filterEmpty(metadata);
         if (filtered.isEmpty()) {
             return NONE;
         }
         StringBuilder sb = new StringBuilder();
-        write(sb, filtered, 0);
-        return truncate(sb.toString(), MAX_CHARS);
+        write(sb, filtered, 0, max);
+        if (sb.length() < max) {
+            return sb.toString();
+        }
+        int cut = sb.lastIndexOf("\n", max);
+        return sb.substring(0, cut > 0 ? cut : Math.min(max, sb.length())) + "\n" + CUT_NOTE;
     }
 
-    /** {@code text} cut at a line end within {@code max} characters, with a note of how much is not shown. */
-    static String truncate(String text, int max) {
-        if (text.length() <= max) {
-            return text;
+    private static void write(StringBuilder sb, Object v, int depth, int max) {
+        if (sb.length() >= max) {
+            return; // enough: the caller cuts and says so
         }
-        int cut = text.lastIndexOf('\n', max);
-        if (cut <= 0) {
-            cut = max;
-        }
-        int more = 0;
-        for (int i = cut; i < text.length(); i++) {
-            if (text.charAt(i) == '\n') {
-                more++;
-            }
-        }
-        return text.substring(0, cut) + "\n… " + more + " more lines (" + (text.length() - cut)
-                + " characters) not shown";
-    }
-
-    private static void write(StringBuilder sb, Object v, int depth) {
-        if (v == null) {
+        if (depth > MAX_DEPTH) {
+            sb.append('…');
+        } else if (v == null) {
             sb.append("null");
         } else if (v instanceof Map) {
             Map<?, ?> m = (Map<?, ?>) v;
@@ -117,7 +115,7 @@ public final class MetadataFormat {
                 indent(sb, depth + 1);
                 quote(sb, String.valueOf(e.getKey()));
                 sb.append(": ");
-                write(sb, e.getValue(), depth + 1);
+                write(sb, e.getValue(), depth + 1, max);
             }
             sb.append('\n');
             indent(sb, depth);
@@ -134,7 +132,7 @@ public final class MetadataFormat {
                     sb.append(",\n");
                 }
                 indent(sb, depth + 1);
-                write(sb, items[i], depth + 1);
+                write(sb, items[i], depth + 1, max);
             }
             sb.append('\n');
             indent(sb, depth);

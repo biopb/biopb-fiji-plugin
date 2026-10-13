@@ -27,7 +27,7 @@ final class MetadataDialog extends JDialog {
     private final JTextArea body = new JTextArea("Loading…");
     private final CopyableIdRow sourceRow = new CopyableIdRow("Source");
     private final CopyableIdRow tensorRow = new CopyableIdRow("Tensor");
-    private final String key;
+    private final java.util.List<Object> key;
     private transient java.util.concurrent.Future<?> read;
 
     MetadataDialog(Window owner, MetadataTarget target) {
@@ -39,8 +39,9 @@ final class MetadataDialog extends JDialog {
         head.setLayout(new BoxLayout(head, BoxLayout.Y_AXIS));
         head.add(selectable(target.getPath(), true));
         if (target.hasTensor()) {
-            head.add(selectable(target.getShape() + "  " + target.getDtype() + "  (" + target.getDims() + ")",
-                    false));
+            javax.swing.JTextArea summary = MetadataPane.wrapped();
+            summary.setText(target.summary());
+            head.add(summary);
         }
         sourceRow.setValue(target.getSourceId());
         head.add(sourceRow);
@@ -80,9 +81,13 @@ final class MetadataDialog extends JDialog {
     }
 
     /** What identifies the window's subject, so asking again finds it. */
-    static String keyOf(MetadataTarget t) { return t.getSourceId() + "|" + t.getArrayId(); }
+    static java.util.List<Object> keyOf(MetadataTarget t) {
+        return java.util.Arrays.<Object>asList(t.getSourceId(), t.getArrayId() == null ? NO_TENSOR : t.getArrayId());
+    }
 
-    String key() { return key; }
+    private static final Object NO_TENSOR = new Object(); // distinct from any array id, so a source and a tensor never collide
+
+    java.util.List<Object> key() { return key; }
 
     /** Shows the (already formatted) metadata text. */
     void showText(String text) {

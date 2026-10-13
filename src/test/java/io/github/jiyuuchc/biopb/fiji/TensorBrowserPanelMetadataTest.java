@@ -321,4 +321,43 @@ public class TensorBrowserPanelMetadataTest {
     public void dialogTitleNamesTheSource() throws Exception {
         assertEquals("Metadata - one.zarr / 0", openFor("one.zarr").getTitle());
     }
+
+    @Test
+    public void aSourceAndItsOnlyTensorKeyApartFromAPipeJoinedLookalike() {
+        MetadataTarget src = MetadataTarget.of(TreeModelBuilderTest.source("a|b", "/x", TreeModelBuilderTest.tensor("c", "u1", 1),
+                TreeModelBuilderTest.tensor("d", "u1", 1)), null);
+        MetadataTarget tensor = MetadataTarget.of(TreeModelBuilderTest.source("a", "/x", TreeModelBuilderTest.tensor("b|null", "u1", 1)), "b|null");
+        assertFalse(MetadataDialog.keyOf(src).equals(MetadataDialog.keyOf(tensor)));
+        MetadataTarget noTensorNamedNull = MetadataTarget.of(TreeModelBuilderTest.source("a", "/x", TreeModelBuilderTest.tensor("null", "u1", 1),
+                TreeModelBuilderTest.tensor("z", "u1", 1)), null);
+        MetadataTarget tensorNamedNull = MetadataTarget.of(TreeModelBuilderTest.source("a", "/x", TreeModelBuilderTest.tensor("null", "u1", 1),
+                TreeModelBuilderTest.tensor("z", "u1", 1)), "null");
+        assertFalse(MetadataDialog.keyOf(noTensorNamedNull).equals(MetadataDialog.keyOf(tensorNamedNull)));
+    }
+
+    @Test
+    public void readsRunOnAtMostFourThreadsAndTheRestWait() throws Exception {
+        CountDownLatch hold = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger running = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger peak = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.ExecutorService pool = panel.getMetadataReads();
+        List<java.util.concurrent.Future<?>> all = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            all.add(pool.submit(() -> {
+                peak.accumulateAndGet(running.incrementAndGet(), Math::max);
+                try {
+                    hold.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                running.decrementAndGet();
+            }));
+        }
+        Thread.sleep(300);
+        assertEquals(4, peak.get());
+        hold.countDown();
+        for (java.util.concurrent.Future<?> f : all) {
+            f.get(10, TimeUnit.SECONDS);
+        }
+    }
 }

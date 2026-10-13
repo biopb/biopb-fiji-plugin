@@ -30,6 +30,7 @@ public class MetadataTargetTest {
         assertEquals("uint16", t.getDtype());
         assertEquals("t, c, y, x", t.getDims());
         assertEquals(Arrays.asList("Shape: 1×3×64×32", "Dtype: uint16", "Dims: t, c, y, x"), t.summaryLines());
+        assertEquals("Shape: 1×3×64×32   Dtype: uint16   Dims: t, c, y, x", t.summary());
     }
 
     @Test

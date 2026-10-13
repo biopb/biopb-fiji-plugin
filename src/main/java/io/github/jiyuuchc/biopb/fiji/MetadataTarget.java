@@ -119,6 +119,9 @@ public final class MetadataTarget {
     /** The axis labels joined by commas, or {@code N/A}. */
     public String getDims() { return dims; }
 
+    /** {@link #summaryLines()} on one line, for a label that wraps. */
+    public String summary() { return String.join("   ", summaryLines()); }
+
     /** The pane's lines under the identifiers: shape, dtype, dims. */
     public List<String> summaryLines() {
         List<String> l = new ArrayList<>();

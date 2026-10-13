@@ -62,10 +62,17 @@ final class CopyableIdRow extends JPanel {
     /** Told the value after each copy, to confirm it. */
     void setOnCopied(Consumer<String> c) { onCopied = c; }
 
+    @Override
+    public void removeNotify() {
+        revert.stop(); // no timer outliving the row's window
+        super.removeNotify();
+    }
+
     /** Told when the clipboard could not be written. */
     void setOnCopyFailed(Runnable r) { onFailed = r; }
 
     JButton button() { return button; }
+    boolean revertRunning() { return revert.isRunning(); }
 
     private void copy() {
         try {

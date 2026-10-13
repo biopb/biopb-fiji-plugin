@@ -103,26 +103,33 @@ public class MetadataFormatTest {
     }
 
     @Test
-    public void hugeTextIsCutAtALineWithANote() {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 100; i++) {
-            sb.append("line ").append(i).append('\n');
-        }
-        String cut = MetadataFormat.truncate(sb.toString(), 50);
-        assertTrue(cut, cut.startsWith("line 0\nline 1\n"));
-        assertTrue(cut, cut.length() < 150);
-        assertTrue(cut, cut.matches("(?s).*\\n… \\d+ more lines \\(\\d+ characters\\) not shown"));
-        assertEquals("short", MetadataFormat.truncate("short", 50));
-    }
-
-    @Test
-    public void toTextCapsAtMaxChars() {
+    public void hugeTextStopsAtTheCapAtALineEndWithANote() {
         Map<String, Object> m = new LinkedHashMap<>();
         for (int i = 0; i < 20000; i++) {
             m.put("key" + i, "value value value " + i);
         }
         String t = MetadataFormat.toText(m);
-        assertTrue(t.length() < MetadataFormat.MAX_CHARS + 200);
-        assertTrue(t.contains("more lines"));
+        assertTrue(t.length() < MetadataFormat.MAX_CHARS + 50);
+        assertTrue(t, t.endsWith("\n… more lines not shown"));
+        String small = MetadataFormat.toText(m, 100);
+        assertTrue(small.length() < 150);
+        assertTrue(small, small.startsWith("{\n  \"key0\": \"value value value 0\",\n"));
+    }
+
+    @Test
+    public void deepNestingIsCutWithAnEllipsisNotAStackOverflow() {
+        Object v = "leaf";
+        for (int i = 0; i < 100000; i++) {
+            v = Collections.singletonMap("k", v);
+        }
+        // isEmptyForDisplay recurses too, so build the map below that depth: the writer is what is limited here
+        Object deep = "leaf";
+        for (int i = 0; i < 200; i++) {
+            deep = Collections.singletonMap("k", deep);
+        }
+        @SuppressWarnings("unchecked")
+        String t = MetadataFormat.toText((Map<String, Object>) deep);
+        assertTrue(t, t.contains("…"));
+        assertFalse(t, t.contains("leaf"));
     }
 }

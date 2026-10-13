@@ -291,11 +291,9 @@ public class TensorBrowserPanel extends JPanel {
     });
     private final JButton cancelResolve = new JButton("Cancel resolve");
     private final MetadataPane infoPane = new MetadataPane(v -> status.setText("Copied " + v), this::copyFailed);
-    private final java.util.concurrent.ExecutorService metadataReads = java.util.concurrent.Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "biopb-metadata");
-        t.setDaemon(true);
-        return t;
-    });
+    // A few daemon threads and a queue, so a stalled server cannot pile up threads. Cancelling a read interrupts
+    // it, but that may not unblock a Flight call: a hung one can keep its thread until the call times out.
+    private final java.util.concurrent.ThreadPoolExecutor metadataReads = newMetadataPool();
     private final Set<MetadataDialog> metadataDialogs = new HashSet<>(); // open, non-modal; closed with the connection
     /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
     BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
@@ -985,6 +983,17 @@ public class TensorBrowserPanel extends JPanel {
         infoPane.show(targetOf(TreeModelBuilder.nodeOf(tree.getLastSelectedPathComponent())));
     }
 
+    private static java.util.concurrent.ThreadPoolExecutor newMetadataPool() {
+        java.util.concurrent.ThreadPoolExecutor p = new java.util.concurrent.ThreadPoolExecutor(4, 4, 30,
+                java.util.concurrent.TimeUnit.SECONDS, new java.util.concurrent.LinkedBlockingQueue<>(), r -> {
+                    Thread t = new Thread(r, "biopb-metadata");
+                    t.setDaemon(true);
+                    return t;
+                });
+        p.allowCoreThreadTimeOut(true);
+        return p;
+    }
+
     private void copyFailed() { status.setText("Could not copy to the clipboard"); }
 
     /**
@@ -1029,8 +1038,11 @@ public class TensorBrowserPanel extends JPanel {
                 Throwable failure = null;
                 try {
                     text = MetadataFormat.toText(c.catalog().getSourceMetadata(sourceId)); // formatted off the EDT
-                } catch (Throwable t) {
+                } catch (Exception t) { // an Error is not ours to hide
                     failure = t;
+                } catch (StackOverflowError | OutOfMemoryError e) { // formatting a huge document: say so, briefly
+                    LOG.log(Level.WARNING, "Formatting the metadata of " + sourceId + " failed", e);
+                    failure = new IllegalStateException("the metadata is too large to show (" + e.getClass().getSimpleName() + ")");
                 }
                 String shown = text;
                 Throwable why = failure;
@@ -1327,6 +1339,7 @@ public class TensorBrowserPanel extends JPanel {
     void simulateCatalogChange() { onCatalogChanged(); }
 
     JTree getTree() { return tree; }
+    java.util.concurrent.ExecutorService getMetadataReads() { return metadataReads; }
     MetadataPane getInfoPane() { return infoPane; }
     Set<MetadataDialog> getMetadataDialogs() { return metadataDialogs; }
     JTextField getAddressField() { return address; }

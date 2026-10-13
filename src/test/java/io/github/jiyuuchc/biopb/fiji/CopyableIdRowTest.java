@@ -1,6 +1,7 @@
 package io.github.jiyuuchc.biopb.fiji;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
@@ -37,5 +38,16 @@ public class CopyableIdRowTest {
         assertTrue(told.isEmpty());
         assertEquals(1, failed.size());
         assertEquals("Copy failed", row.button().getText());
+    }
+
+    @Test
+    public void theRevertTimerStopsWhenTheRowLeavesItsWindow() {
+        CopyableIdRow row = new CopyableIdRow("Source");
+        row.setCopier(v -> { });
+        row.setValue("x");
+        row.button().doClick();
+        assertTrue(row.revertRunning());
+        row.removeNotify();
+        assertFalse(row.revertRunning());
     }
 }
