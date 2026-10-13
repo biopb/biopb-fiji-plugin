@@ -247,6 +247,8 @@ public class SettingsTest {
         assertEquals(100, s.getLong("memory.warn_threshold_mb")); // last good, not the default
         Files.delete(file);
         write("{\"memory\": {\"warn_threshold_mb\": 200}}");
+        // same size as the first file and possibly the same timestamp tick: the change check is mtime+size
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 5000));
         assertEquals(200, s.getLong("memory.warn_threshold_mb")); // retried
     }
 
