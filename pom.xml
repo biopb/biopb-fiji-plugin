@@ -208,12 +208,6 @@
       <artifactId>imglib2</artifactId>
       <scope>provided</scope>
     </dependency>
-    <!-- Settings reads/writes JSON with it; Fiji ships it (version from the pom-scijava BOM, >= 2.8.6 for JsonParser.parseString). -->
-    <dependency>
-      <groupId>com.google.code.gson</groupId>
-      <artifactId>gson</artifactId>
-      <scope>provided</scope>
-    </dependency>
 
     <dependency>
       <groupId>junit</groupId>
