@@ -141,8 +141,11 @@ public final class TensorOpener {
         }
         // Roles are resolved once, on the level-0 shape, so singleton-ness never depends on the level.
         // A label set (see LabelId) takes its image's axes when it is bound to it.
-        LabelOpener.Bound label = LabelId.isLabel(arrayId)
-                ? LabelOpener.bind(client, arrayId, d, axisOverride, IJ::log) : null;
+        LabelOpener.Bound label = null;
+        if (LabelId.isLabel(arrayId)) {
+            precheckLabel(d, shape, level, pyramid, maxPlanePixels, axisOverride); // before the image is fetched
+            label = LabelOpener.bind(client, arrayId, d, axisOverride, IJ::log);
+        }
         AxisMap map = label != null ? label.alignment.labelMap
                 : AxisMap.resolve(d.getDimLabelsList(), shape0, axisOverride);
         PlaneSource.Kind kind = SdkPlaneSource.kindOf(d.getDtype(), map.s >= 0); // rejects bad dtypes now
@@ -163,6 +166,8 @@ public final class TensorOpener {
         ImagePlus imp = assemble(src, title);
         if (label != null) {
             label.calibrate(imp.getCalibration(), d, hint);
+            long[] shown = label.levelHint(hint); // what is displayed: relative to the image's level 0
+            if (shown != null) hint = shown;
         } else {
             applyCalibration(imp.getCalibration(), map, d.getPhysicalScaleList(), d.getPhysicalUnitList(), hint);
         }
@@ -232,6 +237,18 @@ public final class TensorOpener {
         double s = scales.get(axis);
         if (!(s > 0) || units.get(axis).trim().isEmpty()) return 0;
         return s * hint[axis];
+    }
+
+    /** The checks a set would fail anyway (dtype, plane size), done before its image is described. */
+    static void precheckLabel(TensorDescriptor d, long[] shape, int level, List<PyramidLevel> pyramid,
+                                      long maxPlanePixels, String axisOverride) {
+        PlaneSource.Kind kind = SdkPlaneSource.kindOf(d.getDtype(), false);
+        try {
+            AxisMap own = AxisMap.resolve(d.getDimLabelsList(), toArray(d.getShapeList()), axisOverride);
+            checkPlaneSize(shape, own, level, pyramid, maxPlanePixels, kind.bytesPerPixel());
+        } catch (AxisMappingException e) {
+            // the set's own axes are not what it will be opened with if it binds; bind decides
+        }
     }
 
     static void checkPlaneSize(long[] shape, AxisMap map, int level, List<PyramidLevel> pyramid, long limit,

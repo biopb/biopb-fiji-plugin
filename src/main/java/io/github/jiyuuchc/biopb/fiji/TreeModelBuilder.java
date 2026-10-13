@@ -260,13 +260,18 @@ public final class TreeModelBuilder {
         for (Map<?, ?> t : sets) {
             String array = String.valueOf(t.get("array_id"));
             LabelId.Address a = LabelId.parse(array);
-            // The set's own name, not the last segment: a native pyramid level would otherwise be what the row reads.
-            String setName = a == null ? shortName(array) : a.name;
+            // The set's own name (and native level, which makes it a different tensor), not the last segment.
+            String setName = a == null ? shortName(array) : LabelOpener.displayName(a);
             DefaultMutableTreeNode row = node(Kind.LABEL, array, LABEL_GLYPH + " " + setName, tensorSuffix(t),
                     "Label set \u201c" + setName + "\u201d \u2013 opens as a separate label image", Collections.singletonList(array));
             nodeOf(row).sourceId = sourceId;
             parent.add(row);
         }
+    }
+
+    /** How many image tensors (label sets not counted) the source row lists. */
+    public static int imageCount(Map<String, Object> descriptor) {
+        return LabelId.group(tensors(descriptor)).images.size();
     }
 
     private static String withGlyph(String glyph, String suffix) {

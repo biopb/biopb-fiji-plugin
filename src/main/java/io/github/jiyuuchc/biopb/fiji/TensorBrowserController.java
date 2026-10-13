@@ -310,10 +310,19 @@ public class TensorBrowserController implements TensorBrowserListener {
         ui.error(title, message);
     }
 
+    /**
+     * Why ROIs cannot be loaded for {@code arrayId}, or null if they can. ROIs belong to an image, never
+     * to one of its label sets; the panel asks this too, so every path says the same thing.
+     */
+    static String roisRefusal(String arrayId) {
+        return LabelId.isLabel(arrayId) ? "ROIs belong to the image, not to the label set '" + arrayId + "'" : null;
+    }
+
     @Override
     public void roisRequested(String arrayId) {
-        if (LabelId.isLabel(arrayId)) { // ROIs belong to the image, never to one of its label sets
-            ui.error("Load ROIs", "'" + arrayId + "' is a label set; load ROIs for its image instead.");
+        String refusal = roisRefusal(arrayId);
+        if (refusal != null) {
+            status(refusal);
             return;
         }
         RefCountedConnection current = connection.get();

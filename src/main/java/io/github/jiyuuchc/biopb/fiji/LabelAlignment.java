@@ -6,8 +6,9 @@ import java.util.List;
 /**
  * How a label set lines up with its image, decided from the two descriptors alone (no server, no
  * display). Mirrors the napari widget's {@code _label_binding} / {@code _label_rank_matches} /
- * {@code align_label_levels}: a set has the image's axes in the image's order, the channel axis a
- * singleton, and an interleaved RGB samples axis left out. So the set lines up with the image by
+ * {@code align_label_levels}: a set has the image's axes in the image's order and an interleaved RGB
+ * samples axis left out; each of t, c, z is the image's length or a singleton (typically the channel
+ * axis). So the set lines up with the image by
  * position once its rank is checked, and a singleton axis whose image length is greater than 1 is
  * <b>broadcast</b>.
  *

@@ -90,9 +90,9 @@ all" never opens a set implicitly. A set whose image the catalog does not list s
 source), but is not counted as a tensor.
 
 **Double-click** a set (or right-click > Open) to open it as a label image: a lazy virtual stack titled with the
-set's name and its image's (`nuclei (0)`, plus `[level n]` when not 0), 8-bit when the set is uint8, 16-bit when uint16, else float32 (so ids wider than 16 bits are coerced,
-and lose exactness above 2^24). When the set matches its image (the image's axes in the image's order, the
-channel axis a singleton, any RGB samples axis left out) it takes the image's plane grid (a singleton axis is
+set's name and its image's (`nuclei (0)`; `nuclei/1 (0)` for a set stored as a native level, plus `[level n]` when not 0), 8-bit when the set is uint8, 16-bit when uint16, else float32 (so ids wider than 16 bits are coerced,
+and lose exactness above 2^24). When the set matches its image (the image's axes in the image's order, any RGB samples
+axis left out, and each of t, c, z either the image's length or a singleton, typically the channel axis) it takes the image's plane grid (a singleton axis is
 repeated, not re-read) and the image's calibration. A set stored as a native pyramid level (`.../@labels/name/1`) binds to the image level of the same size.
 Otherwise, or if the image cannot be described or needs an axis override that was not given, it opens
 with its own axes and calibration and the reason is written to the Log window, as the napari widget logs and

@@ -308,9 +308,9 @@ public class TensorBrowserPanelTest {
                 TreeModelBuilderTest.tensor("s1/0/@labels/m", "uint8", 2)), "x");
         edt(() -> {
             javax.swing.JPopupMenu m = panel.menuFor(TreeModelBuilder.nodeOf(n.getChildAt(0)));
-            assertEquals(2, m.getComponentCount());
+            assertEquals(3, m.getComponentCount()); // Open, Open at coarser level, Metadata (no Load ROIs)
             assertEquals("Open", ((javax.swing.JMenuItem) m.getComponent(0)).getText());
-            assertEquals(3, panel.menuFor(TreeModelBuilder.nodeOf(n)).getComponentCount());
+            assertEquals(4, panel.menuFor(TreeModelBuilder.nodeOf(n)).getComponentCount());
         });
     }
 

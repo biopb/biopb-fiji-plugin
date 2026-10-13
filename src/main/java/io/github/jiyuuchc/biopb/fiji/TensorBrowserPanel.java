@@ -896,8 +896,9 @@ public class TensorBrowserPanel extends JPanel {
     }
 
     private void fireRois(String arrayId) {
-        if (LabelId.isLabel(arrayId)) {
-            say("ROIs belong to the image, not to a label set");
+        String refusal = TensorBrowserController.roisRefusal(arrayId);
+        if (refusal != null) {
+            say(refusal);
             return;
         }
         for (TensorBrowserListener l : listeners) {
@@ -949,7 +950,7 @@ public class TensorBrowserPanel extends JPanel {
                     fireOpen(id, (Integer) spinner.getValue());
                 }
             }));
-            if (n.getKind() != TreeModelBuilder.Kind.LABEL) { // ROIs belong to the image, not its label sets
+            if (TensorBrowserController.roisRefusal(id) == null) {
                 menu.add(item("Load ROIs", () -> fireRois(id)));
             }
         } else {
@@ -973,14 +974,15 @@ public class TensorBrowserPanel extends JPanel {
     private MetadataTarget targetOf(TreeModelBuilder.Node n) {
         SourceList l = list;
         if (l == null || n == null || n.getSourceId().isEmpty()
-                || n.getKind() != TreeModelBuilder.Kind.SOURCE && n.getKind() != TreeModelBuilder.Kind.TENSOR) {
+                || n.getKind() == TreeModelBuilder.Kind.FOLDER || n.getKind() == TreeModelBuilder.Kind.NOTE) {
             return null;
         }
         Map<String, Object> row = l.getSources().get(n.getSourceId());
         if (row == null) {
             return null;
         }
-        String arrayId = n.getKind() == TreeModelBuilder.Kind.TENSOR ? n.getKey()
+        String arrayId = n.getKind() == TreeModelBuilder.Kind.TENSOR || n.getKind() == TreeModelBuilder.Kind.LABEL
+                ? n.getKey()
                 : n.getArrayIds().size() == 1 ? n.getArrayIds().get(0) : null;
         return MetadataTarget.of(row, arrayId);
     }
@@ -1206,9 +1208,9 @@ public class TensorBrowserPanel extends JPanel {
         }
     }
 
+    /** Images the source holds: its label sets ride under them and are not tensors to count. */
     private static int tensorCount(Map<String, Object> row) {
-        Object t = row.get("tensors");
-        return t instanceof java.util.Collection ? ((java.util.Collection<?>) t).size() : 0;
+        return TreeModelBuilder.imageCount(row);
     }
 
     private static String humanBytes(long n) {

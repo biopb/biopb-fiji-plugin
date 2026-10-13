@@ -71,7 +71,7 @@ public class LabelSetTest {
         assertEquals(Kind.LABEL, k.get(0).getKind());
         // sorted by array id; the row reads the set's name, not a pyramid level
         assertEquals(TreeModelBuilder.LABEL_GLYPH + " a", k.get(0).getText());
-        assertEquals(TreeModelBuilder.LABEL_GLYPH + " cells", k.get(1).getText());
+        assertEquals(TreeModelBuilder.LABEL_GLYPH + " cells/1", k.get(1).getText()); // a native level is its own tensor
         assertEquals(Arrays.asList("s/0/@labels/cells/1"), k.get(1).getArrayIds());
         assertTrue(k.get(1).isOpenable());
         assertEquals("32×16 uint32", k.get(1).getSuffix());
@@ -237,7 +237,106 @@ public class LabelSetTest {
     public void titlesNameTheImageAndTheLevel() {
         assertEquals("nuclei (0)", LabelOpener.title("s/0/@labels/nuclei", 0));
         assertEquals("nuclei (0) [level 2]", LabelOpener.title("s/0/@labels/nuclei", 2));
-        assertEquals("nuclei (b)", LabelOpener.title("s/b/@labels/nuclei/1", 0)); // native level is not the name
+        // a native-level set is another tensor than the set itself: titles (and rows) tell them apart
+        assertEquals("nuclei/1 (b)", LabelOpener.title("s/b/@labels/nuclei/1", 0));
+        assertEquals("nuclei/1 (b) [level 1]", LabelOpener.title("s/b/@labels/nuclei/1", 1));
+        assertFalse(LabelOpener.title("s/b/@labels/nuclei", 0).equals(LabelOpener.title("s/b/@labels/nuclei/1", 0)));
+        DefaultMutableTreeNode n = TreeModelBuilder.sourceNode(TreeModelBuilderTest.source("s", "u",
+                TreeModelBuilderTest.tensor("s/b", "uint8", 8), TreeModelBuilderTest.tensor("s/b/@labels/nuclei", "uint8", 8),
+                TreeModelBuilderTest.tensor("s/b/@labels/nuclei/1", "uint8", 4)), "x");
+        assertEquals(TreeModelBuilder.LABEL_GLYPH + " nuclei", kids(n).get(0).getText());
+        assertEquals(TreeModelBuilder.LABEL_GLYPH + " nuclei/1", kids(n).get(1).getText());
+    }
+
+    @Test
+    public void levelInfoDescribesWhatIsDisplayed() {
+        TensorDescriptor image = TensorDescriptor.newBuilder().setArrayId("i").setDtype("<u1")
+                .addDimLabels("y").addDimLabels("x").addDimLabels("s").addShape(8).addShape(8).addShape(3)
+                .addPyramid(biopb.tensor.PyramidLevel.newBuilder().addShape(8).addShape(8).addShape(3)
+                        .addScaleHint(1).addScaleHint(1).addScaleHint(1))
+                .addPyramid(biopb.tensor.PyramidLevel.newBuilder().addShape(4).addShape(4).addShape(3)
+                        .addScaleHint(2).addScaleHint(2).addScaleHint(1)).build();
+        // a native-level set (no samples axis) the size of image level 1
+        LabelAlignment a = LabelAlignment.decideLevels(L("y", "x", "s"), Arrays.asList(new long[] {8, 8, 3},
+                new long[] {4, 4, 3}), L("y", "x"), new long[] {4, 4}, null);
+        assertTrue(a.note, a.aligned);
+        assertEquals(1, a.imageLevel);
+        LabelOpener.Bound b = new LabelOpener.Bound(a, image, "m");
+        assertArrayEquals(new long[] {2, 2}, b.levelHint(new long[] {1, 1})); // relative to image level 0
+        assertNull(b.levelHint(new long[] {1})); // does not fit
+        Calibration cal = new Calibration();
+        b.calibrate(cal, image, new long[] {1}); // bound but unfit: untouched, no exception
+        assertEquals(1.0, cal.pixelWidth, 0);
+        // the LevelInfo built from the displayed hint carries the image-level scales
+        TensorOpener.LevelInfo li = new TensorOpener.LevelInfo("m", 0, b.levelHint(new long[] {1, 1}), "", a.labelMap);
+        assertEquals(2, li.getScaleX(), 0);
+        assertEquals("yx", li.getRoles());
+        // not bound: the hint is its own
+        LabelAlignment un = LabelAlignment.decide(null, null, L("y", "x"), new long[] {8, 8}, null);
+        assertArrayEquals(new long[] {3, 3}, new LabelOpener.Bound(un, null, "m").levelHint(new long[] {3, 3}));
+    }
+
+    @Test
+    public void levelInfoGridMatchesAnImageWithABroadcastChannel() {
+        LabelAlignment a = LabelAlignment.decide(TCZYX, new long[] {1, 2, 1, 4, 6}, TCZYX, new long[] {1, 1, 1, 4, 6}, null);
+        LabelOpener.Bound b = new LabelOpener.Bound(a, null, "m");
+        ImagePlus imp = TensorOpener.assemble(b.gridded(new FakePlaneSource(1, 1, 1)), "m");
+        assertEquals(2, imp.getNChannels()); // the image's grid
+        assertEquals("tczyx", a.labelMap.roles()); // so roles/plane placement agree with it
+        assertEquals(1, a.labelMap.c);
+    }
+
+    @Test
+    public void aSetThatWillBeRefusedIsRefusedBeforeItsImageIsFetched() {
+        TensorDescriptor bad = desc(L("y", "x"), new long[] {8, 8}, new double[] {}, "").toBuilder().setDtype("<U5").build();
+        try {
+            TensorOpener.precheckLabel(bad, new long[] {8, 8}, 0, bad.getPyramidList(), 1L << 28, null);
+            fail("dtype");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("Unsupported dtype"));
+        }
+        TensorDescriptor big = desc(L("y", "x"), new long[] {70000, 70000}, new double[] {}, "");
+        try {
+            TensorOpener.precheckLabel(big, new long[] {70000, 70000}, 0, big.getPyramidList(), 1L << 28, null);
+            fail("size");
+        } catch (PlaneTooLargeException expected) {
+            // the same refusal an image gets
+        }
+        // an unusable axis set is bind's business, not a refusal here
+        TensorOpener.precheckLabel(desc(L("dim0", "dim1", "dim2"), new long[] {2, 8, 8}, new double[] {}, ""),
+                new long[] {2, 8, 8}, 0, java.util.Collections.<biopb.tensor.PyramidLevel>emptyList(), 1L << 28, null);
+    }
+
+    @Test
+    public void channelEqualToTheImagesBindsToo() {
+        LabelAlignment a = LabelAlignment.decide(TCZYX, new long[] {1, 3, 1, 4, 6}, TCZYX, new long[] {1, 3, 1, 4, 6}, null);
+        assertTrue(a.note, a.aligned); // napari's align_label_levels only broadcasts singletons; equal is fine
+        assertEquals(3, a.sizeC);
+    }
+
+    @Test
+    public void aBoundNoteIsToldOncePerSetAndReason() {
+        LabelOpener.forgetNotes();
+        List<String> said = new ArrayList<>();
+        LabelOpener.noteOnce("s/0/@labels/m", "why", said::add);
+        LabelOpener.noteOnce("s/0/@labels/m", "why", said::add); // a level switch
+        LabelOpener.noteOnce("s/0/@labels/m", "other", said::add);
+        LabelOpener.noteOnce("s/0/@labels/n", "why", said::add);
+        assertEquals(3, said.size());
+    }
+
+    @Test
+    public void searchResultsAndResolvesCountImagesNotSets() {
+        Map<String, Object> d = TreeModelBuilderTest.source("s", "/d/a.zarr", TreeModelBuilderTest.tensor("s/0", "uint8", 8),
+                TreeModelBuilderTest.tensor("s/0/@labels/m", "uint8", 8), TreeModelBuilderTest.tensor("s/gone/@labels/o", "uint8", 8));
+        assertEquals(1, TreeModelBuilder.imageCount(d));
+        // a path-built (search) tree draws the same rows under the source, label rows included
+        DefaultMutableTreeNode root = TreeModelBuilder.buildPaths(Arrays.asList(d));
+        DefaultMutableTreeNode src = root;
+        while (TreeModelBuilder.nodeOf(src) == null || TreeModelBuilder.nodeOf(src).getKind() != Kind.SOURCE) src = (DefaultMutableTreeNode) src.getChildAt(0);
+        assertEquals(2, src.getChildCount());
+        assertEquals(Arrays.asList(Kind.LABEL, Kind.LABEL), Arrays.asList(kids(src).get(0).getKind(), kids(src).get(1).getKind()));
+        assertEquals("s", kids(src).get(0).getSourceId());
     }
 
     @Test

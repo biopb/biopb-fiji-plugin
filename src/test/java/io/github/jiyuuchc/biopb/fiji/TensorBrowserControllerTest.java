@@ -317,7 +317,11 @@ public class TensorBrowserControllerTest {
         fetcher = (c, id, i, info) -> { throw new IOException("must not be asked"); };
         TensorBrowserController c = controller(null);
         edt(() -> c.roisRequested("s/0/@labels/m"));
-        assertTrue(log.contains("error:Load ROIs"));
+        assertFalse(log.stream().anyMatch(l -> l.startsWith("error:"))); // a status note, no modal
+        assertTrue(log.stream().anyMatch(l -> l.startsWith("status:ROIs belong to the image")));
+        assertEquals(TensorBrowserController.roisRefusal("s/0/@labels/m"),
+                log.stream().filter(l -> l.startsWith("status:")).findFirst().get().substring(7));
+        assertEquals(null, TensorBrowserController.roisRefusal("s/0"));
         assertEquals(1, conn.refCount());
     }
 
