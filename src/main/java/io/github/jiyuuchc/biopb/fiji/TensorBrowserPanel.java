@@ -4,7 +4,11 @@ import biopb.tensor.TensorFlightClient;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
-import java.awt.FlowLayout;
+import java.awt.Dimension;
+import java.awt.Graphics;
+import java.awt.GridBagConstraints;
+import java.awt.GridBagLayout;
+import java.awt.Insets;
 import java.awt.Point;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -76,6 +80,8 @@ public class TensorBrowserPanel extends JPanel {
     public static final String DEFAULT_ADDRESS = "localhost:8815";
     private static final int DEFAULT_PORT = 8815;
     private static final int DEBOUNCE_MS = 300;
+    private static final int OUTER_MARGIN = 10;
+    private static final int ROW_GAP = 6;
 
     /** A live connection to a server. */
     public interface Connection extends AutoCloseable {
@@ -238,14 +244,27 @@ public class TensorBrowserPanel extends JPanel {
 
     private final ClientFactory factory;
     private final List<TensorBrowserListener> listeners = new CopyOnWriteArrayList<>();
-    private final JTextField address = new JTextField(18);
+    private final JTextField address = new JTextField(12);
     private final JPasswordField token = new JPasswordField(10);
     private final JButton connectButton = new JButton("Connect");
-    private final JLabel status = new JLabel(" ");
+    private final StatusDot dot = new StatusDot();
+    private final StatusLabel status = new StatusLabel(dot);
     private final JTextField search = new JTextField();
     private final JLabel searchStatus = new JLabel(" ");
     private final DefaultTreeModel model = new DefaultTreeModel(new DefaultMutableTreeNode());
-    private final JTree tree = new JTree(model);
+    private final JTree tree = new JTree(model) {
+        private static final long serialVersionUID = 1L;
+
+        @Override protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            String msg = emptyMessage();
+            if (msg != null) { // an empty tree says why, in its own area
+                java.awt.FontMetrics fm = g.getFontMetrics();
+                g.setColor(UIManager.getColor("Label.disabledForeground"));
+                g.drawString(msg, Math.max(4, (getWidth() - fm.stringWidth(msg)) / 2), 24 + fm.getAscent());
+            }
+        }
+    };
     private final JScrollPane scroll = new JScrollPane(tree);
     private final Timer debounce;
 
@@ -326,7 +345,7 @@ public class TensorBrowserPanel extends JPanel {
      * @param initialToken the token field's initial text
      */
     public TensorBrowserPanel(ClientFactory factory, String initialAddress, String initialToken) {
-        super(new BorderLayout(0, 4));
+        super(new BorderLayout(0, ROW_GAP));
         this.factory = (u, t) -> new RefCountedConnection(factory.connect(u, t));
         address.setText(initialAddress);
         address.setToolTipText("host:port, grpc://host:port or grpc+tls://host:port; empty: discover the local server");
@@ -339,29 +358,60 @@ public class TensorBrowserPanel extends JPanel {
         tree.setCellRenderer(new Renderer());
         javax.swing.ToolTipManager.sharedInstance().registerComponent(tree);
 
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-        bar.add(new JLabel("Server"));
-        bar.add(address);
-        bar.add(new JLabel("Token"));
-        bar.add(token);
-        bar.add(connectButton);
+        placeholder(address, "host:port - empty = auto-discover");
+        placeholder(search, "Search sources...");
+        token.setMinimumSize(new Dimension(60, token.getPreferredSize().height));
+        address.setMinimumSize(new Dimension(80, address.getPreferredSize().height));
         cancelResolve.setVisible(false);
-        bar.add(cancelResolve);
-        JPanel top = new JPanel(new BorderLayout(0, 2));
-        top.add(bar, BorderLayout.NORTH);
-        top.add(status, BorderLayout.CENTER);
-        top.add(editor.view(), BorderLayout.SOUTH);
-        editor.acceptDropsOn(this, tree, scroll, scroll.getViewport());
+        JPanel statusRow = new JPanel(new BorderLayout(6, 0));
+        statusRow.add(status, BorderLayout.CENTER);
+        statusRow.add(cancelResolve, BorderLayout.EAST);
         search.setToolTipText("Search sources by id, URL or type (on the server)");
-        JPanel south = new JPanel(new BorderLayout(0, 2));
-        south.add(search, BorderLayout.NORTH);
-        south.add(searchStatus, BorderLayout.SOUTH);
+        editor.acceptDropsOn(this, tree, scroll, scroll.getViewport());
+
+        // Top: a two-row form (the address stretches, Connect is never pushed out), the status line, the
+        // add row and the search field, one column with an even gap between rows.
+        JPanel top = new JPanel(new GridBagLayout());
+        GridBagConstraints c = new GridBagConstraints();
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.insets = new Insets(0, 0, 0, 6);
+        c.gridy = 0;
+        c.gridx = 0;
+        top.add(new JLabel("Server"), c);
+        c.gridx = 1;
+        c.weightx = 1;
+        top.add(address, c);
+        c.gridx = 2;
+        c.weightx = 0;
+        c.insets = new Insets(0, 0, 0, 0);
+        c.gridheight = 2;
+        c.fill = GridBagConstraints.BOTH;
+        top.add(connectButton, c); // spans both rows, beside the two fields
+        c.gridheight = 1;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.gridy = 1;
+        c.gridx = 0;
+        c.insets = new Insets(ROW_GAP, 0, 0, 6);
+        top.add(new JLabel("Token"), c);
+        c.gridx = 1;
+        c.weightx = 1;
+        top.add(token, c);
+        c.gridx = 0;
+        c.gridwidth = 3;
+        c.insets = new Insets(ROW_GAP, 0, 0, 0);
+        for (java.awt.Component row : new java.awt.Component[] {statusRow, editor.view(), search}) {
+            c.gridy++;
+            top.add(row, c);
+        }
+        JPanel bottom = new JPanel(new BorderLayout(0, 2));
+        searchStatus.setForeground(UIManager.getColor("Label.disabledForeground"));
+        bottom.add(searchStatus, BorderLayout.NORTH);
+        bottom.add(infoPane, BorderLayout.CENTER);
+        setBorder(javax.swing.BorderFactory.createEmptyBorder(OUTER_MARGIN, OUTER_MARGIN, 0, OUTER_MARGIN));
         add(top, BorderLayout.NORTH);
         add(scroll, BorderLayout.CENTER);
-        JPanel bottom = new JPanel(new BorderLayout());
-        bottom.add(infoPane, BorderLayout.NORTH);
-        bottom.add(south, BorderLayout.CENTER);
         add(bottom, BorderLayout.SOUTH);
+        setMinimumSize(new Dimension(360, 320));
 
         debounce = new Timer(DEBOUNCE_MS, e -> applyFilter());
         debounce.setRepeats(false);
@@ -435,7 +485,7 @@ public class TensorBrowserPanel extends JPanel {
         try {
             url = discover ? null : toUrl(address.getText());
         } catch (IllegalArgumentException e) {
-            status.setText(e.getMessage());
+            showState(ConnectionStatus.State.ERROR, e.getMessage(), null);
             return;
         }
         char[] typed = token.getPassword();
@@ -445,7 +495,7 @@ public class TensorBrowserPanel extends JPanel {
         if (tokenArg != null && !isTls(url) && !isLoopback(url)) {
             String msg = "Not sending the token to " + describe(url) + ": it would cross the network unencrypted. "
                     + "Use grpc+tls://" + url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "") + " (or clear the Token field).";
-            status.setText(msg);
+            showState(ConnectionStatus.State.ERROR, msg, null);
             notifyError(msg, connectGen);
             return;
         }
@@ -455,7 +505,7 @@ public class TensorBrowserPanel extends JPanel {
         address.setEnabled(false);
         token.setEnabled(false);
         editor.updateHint();
-        status.setText("Connecting to " + target + "…");
+        showState(ConnectionStatus.State.CONNECTING, "Connecting\u2026", "Connecting to " + target + "\u2026");
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
                 Connection c = factory.connect(url, tokenArg);
@@ -484,9 +534,9 @@ public class TensorBrowserPanel extends JPanel {
                     if (gen == connectGen) {
                         Throwable cause = e.getCause() == null ? e : e.getCause();
                         String why = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getName();
-                        status.setText(connection == null ? "Connection failed: " + why
+                        showState(ConnectionStatus.State.ERROR, connection == null ? "Connection failed: " + why
                                 : "Connection to " + target + " failed (" + why
-                                        + "); still connected to " + connectionName);
+                                        + "); still connected to " + connectionName, null);
                         notifyError(why, gen);
                     }
                     return;
@@ -497,7 +547,8 @@ public class TensorBrowserPanel extends JPanel {
                     release(c, l);
                     return;
                 }
-                install(c, l, c.url() != null ? describe(c.url()) : url != null ? describe(url) : "the discovered server");
+                String dialed = c.url() != null ? c.url() : url;
+                install(c, l, dialed != null ? describe(dialed) : "the discovered server", dialed);
             }
         }.execute();
     }
@@ -587,7 +638,7 @@ public class TensorBrowserPanel extends JPanel {
         return t;
     }
 
-    private void install(Connection c, SourceList l, String name) {
+    private void install(Connection c, SourceList l, String name, String dialed) {
         forgetResolve();
         closeMetadataDialogs();
         release(connection, list);
@@ -619,7 +670,8 @@ public class TensorBrowserPanel extends JPanel {
             }
         }));
         l.startWatch();
-        status.setText("Connected to " + name + (l.isLazy() ? "" : " • " + l.getSources().size() + " sources"));
+        showState(ConnectionStatus.State.CONNECTED, ConnectionStatus.connectedText(dialed)
+                + (l.isLazy() ? "" : " \u2022 " + l.getSources().size() + " sources"), ConnectionStatus.connectedDetail(name));
         rebuild();
     }
 
@@ -1383,6 +1435,56 @@ public class TensorBrowserPanel extends JPanel {
 
         private static String esc(String s) {
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+        }
+    }
+
+    /** Greyed hint text in an empty field (FlatLaf; ignored by other look and feels). */
+    private static void placeholder(JTextField field, String text) {
+        field.putClientProperty("JTextField.placeholderText", text);
+    }
+
+    /** The empty-tree message, or {@code null} while the tree has rows. */
+    private String emptyMessage() {
+        if (((DefaultMutableTreeNode) model.getRoot()).getChildCount() > 0) {
+            return null;
+        }
+        return EmptyState.message(list != null, !disposed && !connectButton.isEnabled(), searchResult != null,
+                connection != null && connection.url() != null && DropPolicy.isLocalUrl(connection.url()));
+    }
+
+    /** Sets the connection state (the dot) together with the status text and its detail tooltip. */
+    private void showState(ConnectionStatus.State state, String text, String detail) {
+        dot.setState(state);
+        status.setSummary(text, detail);
+        status.setText(text);
+    }
+
+    /** The status line: a dot, one line of text, and the full text (or the connection's detail) as tooltip. */
+    private static final class StatusLabel extends JLabel {
+        private static final long serialVersionUID = 1L;
+        private String summary = "";
+        private String detail;
+
+        StatusLabel(StatusDot dot) {
+            super("Not connected", dot, LEADING);
+            setIconTextGap(6);
+            setToolTipText(null);
+            javax.swing.ToolTipManager.sharedInstance().registerComponent(this);
+        }
+
+        void setSummary(String text, String detail) {
+            this.summary = text;
+            this.detail = detail;
+        }
+
+        @Override public void setText(String text) {
+            super.setText(text);
+            boolean own = text != null && text.equals(summary) && detail != null;
+            setToolTipText(own ? detail : text == null || text.trim().isEmpty() ? null : text);
+        }
+
+        @Override public Dimension getMinimumSize() { // a long message is cut with an ellipsis, not made to widen the window
+            return new Dimension(0, super.getMinimumSize().height);
         }
     }
 

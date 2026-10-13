@@ -18,7 +18,6 @@ import javax.swing.DropMode;
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JFileChooser;
-import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -89,7 +88,20 @@ final class SourceEditor {
     private final Host host;
     private final JPanel view = new JPanel(new BorderLayout(6, 0));
     private final JButton addButton = new JButton("Add folder/file…");
-    private final JLabel hint = new JLabel(" ");
+    private final JTextArea hint = new JTextArea(" ") { // wraps at word boundaries instead of being cut off
+        private static final long serialVersionUID = 1L;
+
+        @Override public java.awt.Dimension getPreferredSize() {
+            if (getWidth() > 0) { // the height of wrapped text depends on the width it is laid out at
+                setSize(getWidth(), Short.MAX_VALUE);
+            }
+            return super.getPreferredSize();
+        }
+
+        @Override public java.awt.Dimension getMinimumSize() { // may shrink in width, but keeps the height its wrapped text needs
+            return new java.awt.Dimension(0, getPreferredSize().height);
+        }
+    };
     private final JButton cancelButton = new JButton("Cancel add");
     private Prompts prompts = new SwingPrompts();
     private java.util.function.Predicate<String> sizer = CloudDrop::exceedsEntryThreshold;
@@ -106,6 +118,26 @@ final class SourceEditor {
         view.add(hint, BorderLayout.CENTER);
         view.add(cancelButton, BorderLayout.EAST);
         hint.setForeground(UIManager.getColor("Label.disabledForeground"));
+        hint.setFont(UIManager.getFont("Label.font"));
+        hint.setLineWrap(true);
+        hint.setWrapStyleWord(true);
+        hint.setEditable(false);
+        hint.setFocusable(false);
+        hint.setOpaque(false);
+        hint.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 4, 0, 0));
+        hint.addComponentListener(new java.awt.event.ComponentAdapter() {
+            private int lastWidth = -1;
+
+            @Override public void componentResized(java.awt.event.ComponentEvent e) { // re-wrap: the height depends on the width
+                if (hint.getWidth() != lastWidth) {
+                    lastWidth = hint.getWidth();
+                    SwingUtilities.invokeLater(() -> {
+                        hint.invalidate();
+                        view.revalidate();
+                    });
+                }
+            }
+        });
         cancelButton.setVisible(false);
         addButton.addActionListener(e -> addFromChooser());
         cancelButton.addActionListener(e -> cancelAdd());

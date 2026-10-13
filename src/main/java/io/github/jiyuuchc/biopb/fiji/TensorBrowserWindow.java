@@ -3,6 +3,9 @@ package io.github.jiyuuchc.biopb.fiji;
 import ij.ImagePlus;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.awt.GraphicsDevice;
+import java.awt.GraphicsEnvironment;
+import java.awt.Rectangle;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.function.Supplier;
@@ -21,6 +24,11 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
     private final TensorBrowserPanel panel;
     private final JLabel status = new JLabel(" ");
     private final JProgressBar progress = new JProgressBar();
+    private static final Dimension DEFAULT_SIZE = new Dimension(560, 720);
+    private static final Dimension MIN_SIZE = new Dimension(400, 460);
+    private final WindowPrefs prefs = new WindowPrefs();
+    private final javax.swing.Timer saveBounds = new javax.swing.Timer(500, e -> rememberBounds());
+    private boolean placed; // the position came from the saved bounds
 
     private TensorBrowserWindow(TensorBrowserPanel panel) {
         super("BioPB Tensor Browser");
@@ -29,22 +37,58 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
         progress.setVisible(false);
         progress.setPreferredSize(new Dimension(120, 12));
         JPanel south = new JPanel(new BorderLayout(6, 0));
-        south.setBorder(javax.swing.BorderFactory.createEmptyBorder(2, 6, 4, 6));
+        south.setBorder(javax.swing.BorderFactory.createEmptyBorder(4, 10, 8, 10));
         south.add(status, BorderLayout.CENTER);
         south.add(progress, BorderLayout.EAST);
         add(panel, BorderLayout.CENTER);
         add(south, BorderLayout.SOUTH);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(480, 640);
+        setMinimumSize(MIN_SIZE);
+        setSize(DEFAULT_SIZE);
+        restoreBounds();
+        saveBounds.setRepeats(false);
+        addComponentListener(new java.awt.event.ComponentAdapter() {
+            @Override public void componentResized(java.awt.event.ComponentEvent e) { saveBounds.restart(); }
+
+            @Override public void componentMoved(java.awt.event.ComponentEvent e) { saveBounds.restart(); }
+        });
         panel.addListener(new TensorBrowserController(panel::getSharedConnection, this));
         addWindowListener(new WindowAdapter() {
+            @Override public void windowClosing(WindowEvent e) { rememberBounds(); }
+
             @Override public void windowClosed(WindowEvent e) {
+                saveBounds.stop();
                 panel.dispose();
                 if (instance == TensorBrowserWindow.this) {
                     instance = null;
                 }
             }
         });
+    }
+
+    /** Uses the size and position of the last session, when they are still on a screen. */
+    private void restoreBounds() {
+        Rectangle[] screens;
+        if (GraphicsEnvironment.isHeadless()) {
+            return;
+        }
+        GraphicsDevice[] devices = GraphicsEnvironment.getLocalGraphicsEnvironment().getScreenDevices();
+        screens = new Rectangle[devices.length];
+        for (int i = 0; i < devices.length; i++) {
+            screens[i] = devices[i].getDefaultConfiguration().getBounds();
+        }
+        Rectangle r = WindowPrefs.usable(prefs.load(), MIN_SIZE, screens);
+        if (r != null) {
+            setBounds(r);
+            placed = true;
+        }
+    }
+
+    /** Saves the bounds of a normal (not maximised or minimised) window. */
+    private void rememberBounds() {
+        if (isShowing() && (getExtendedState() & (MAXIMIZED_BOTH | ICONIFIED)) == 0) {
+            prefs.save(getBounds());
+        }
     }
 
     /**
@@ -59,7 +103,7 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
             TensorBrowserPanel p = panels.get();
             try {
                 TensorBrowserWindow w = new TensorBrowserWindow(p);
-                w.setLocationByPlatform(true);
+                w.setLocationByPlatform(!w.placed);
                 instance = w;
             } catch (Throwable t) {
                 p.dispose();

@@ -207,7 +207,8 @@ public class ServerConnectorTest {
         try {
             SwingUtilities.invokeAndWait(p::connect);
             await(() -> p.getConnection() != null);
-            assertTrue(p.getStatusLabel().getText(), p.getStatusLabel().getText().startsWith("Connected to h:1 (TLS)"));
+            assertTrue(p.getStatusLabel().getText(), p.getStatusLabel().getText().startsWith("Connected - remote (TLS)"));
+            assertEquals("Connected to h:1 (TLS)", p.getStatusLabel().getToolTipText());
             assertEquals("grpc+tls://h:1|null", asked.get(0)); // an empty token field is no token
             SwingUtilities.invokeAndWait(() -> {
                 p.getAddressField().setText("");
@@ -215,7 +216,8 @@ public class ServerConnectorTest {
             });
             await(() -> asked.size() == 2 && p.getConnectButton().isEnabled());
             assertEquals("null|null", asked.get(1));
-            assertTrue(p.getStatusLabel().getText(), p.getStatusLabel().getText().startsWith("Connected to found:9 (TLS)"));
+            assertTrue(p.getStatusLabel().getText(), p.getStatusLabel().getText().startsWith("Connected - remote (TLS)"));
+            assertEquals("Connected to found:9 (TLS)", p.getStatusLabel().getToolTipText());
         } finally {
             SwingUtilities.invokeAndWait(p::dispose);
         }
