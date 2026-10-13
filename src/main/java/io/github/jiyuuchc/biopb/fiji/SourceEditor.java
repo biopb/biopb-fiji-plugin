@@ -92,11 +92,12 @@ final class SourceEditor {
     private final JLabel hint = new JLabel(" ");
     private final JButton cancelButton = new JButton("Cancel add");
     private Prompts prompts = new SwingPrompts();
+    private java.util.function.Predicate<String> sizer = CloudDrop::exceedsEntryThreshold;
     private Supplier<File> chooser = this::chooseFile;
     private File lastDir;
     private AddJob adding;
     private Object removing; // the running removal's token
-    private boolean checking; // a dropped folder is being sized, off the EDT
+    private Object checking; // the drop being sized and confirmed (token), until its add starts or it is declined
     private final Set<String> skippedCloudPaths = new HashSet<>(); // adds that left offline files out
 
     SourceEditor(Host host) {
@@ -128,11 +129,19 @@ final class SourceEditor {
     // --- state ---------------------------------------------------------------
 
     private DropPolicy.Decision decision() {
+        return decision(checking != null);
+    }
+
+    /** {@link #decision()} with the drop being checked counted as busy or not. */
+    private DropPolicy.Decision decision(boolean checkBusy) {
         DropPolicy.Decision d = DropPolicy.decide(host.connecting(), host.list() != null, host.url(),
-                adding != null || checking);
+                adding != null || checkBusy);
         // One change at a time: a removal holds off an add as an add holds off a removal.
         return d.isOk() && removing != null ? new DropPolicy.Decision(false, REMOVING) : d;
     }
+
+    /** Whether a source may be added or removed right now (the gate both use). */
+    boolean canChange() { return decision().isOk(); }
 
     /** Shown while a removal runs. */
     static final String REMOVING = "Removing data\u2026";
@@ -154,7 +163,7 @@ final class SourceEditor {
         }
         adding = null;
         removing = null;
-        checking = false;
+        checking = null;
         skippedCloudPaths.clear();
         cancelButton.setVisible(false);
         updateHint();
@@ -163,11 +172,13 @@ final class SourceEditor {
     boolean isAdding() { return adding != null; }
 
     /** Whether an add is being checked or run, or a removal runs. */
-    boolean isBusy() { return adding != null || checking || removing != null; }
+    boolean isBusy() { return adding != null || checking != null || removing != null; }
 
     boolean isRemoving() { return removing != null; }
 
     void setPrompts(Prompts p) { prompts = p; }
+
+    void setSizer(java.util.function.Predicate<String> p) { sizer = p; }
 
     void setChooser(Supplier<File> c) { chooser = c; }
 
@@ -214,45 +225,55 @@ final class SourceEditor {
         if (!decision().isOk()) {
             return;
         }
-        checking = true; // another drop waits for this one
+        Object job = new Object();
+        checking = job; // another drop or Add waits until this one has started or been declined
         updateHint();
         new SwingWorker<Boolean, Void>() {
             @Override protected Boolean doInBackground() {
-                return CloudDrop.exceedsEntryThreshold(path); // walks the folder: not on the EDT
+                return sizer.test(path); // walks the folder: not on the EDT
             }
 
             @Override protected void done() {
-                if (!checking || l != host.list()) {
+                if (checking != job) {
                     return; // another connection now
                 }
-                checking = false;
                 boolean large;
                 try {
                     large = get();
                 } catch (ExecutionException e) {
-                    large = false; // unreadable: proceed unconfirmed, as the size gate does on a walk error
+                    // The only guard against dropping a huge folder by mistake: when it cannot say, ask.
+                    LOG.log(Level.WARNING, "Sizing the dropped folder failed; asking to confirm", e);
+                    large = true;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    updateHint();
+                    release(job);
                     return;
                 }
-                afterSizing(l, path, large);
+                try {
+                    afterSizing(l, path, large);
+                } finally {
+                    release(job); // adding (set by startAdd) keeps the gate if the add started
+                }
             }
         }.execute();
     }
 
+    private void release(Object job) {
+        if (checking == job) {
+            checking = null;
+        }
+        updateHint();
+    }
+
     private void afterSizing(SourceList l, String path, boolean large) {
-        if (!decision().isOk() || l != host.list()) {
-            updateHint();
+        if (!decision(false).isOk() || l != host.list()) {
             return;
         }
         if (large && !prompts.confirm("Add large folder?", SourceMessages.largeFolder(path), false)) {
-            updateHint();
             return; // declined scanning an oversized folder; nothing sent
         }
         String warning = CloudDrop.warning(path);
         if (warning != null && !prompts.confirm("Add source from a cloud folder?", warning, true)) {
-            updateHint();
             return;
         }
         // As in napari: a confirmed cloud folder is the user's say-so to register the offline
@@ -262,8 +283,7 @@ final class SourceEditor {
         boolean cloud = (warning != null)
                 || (skippedCloudPaths.contains(path)
                         && prompts.confirm("Add as cloud sources?", SourceMessages.cloudRedrop(path), false));
-        if (l != host.list() || !decision().isOk()) {
-            updateHint();
+        if (l != host.list() || !decision(false).isOk()) {
             return;
         }
         startAdd(l, path, cloud);
@@ -346,7 +366,7 @@ final class SourceEditor {
             return;
         }
         SourceList l = host.list();
-        if (!prompts.confirm("Remove dropped source?", SourceMessages.confirmRemove(displayName), false)
+        if (!prompts.confirm("Remove dropped source?", SourceMessages.confirmRemove(displayName, rootUrl), false)
                 || l != host.list() || !decision().isOk()) {
             return;
         }
@@ -412,6 +432,8 @@ final class SourceEditor {
             return previous == null ? NONE : previous.getSourceActions(c);
         }
 
+        // createTransferable and exportDone are protected and run inside the previous handler's own
+        // exportToClipboard / exportAsDrag, which are forwarded whole, so they are the previous handler's.
         @Override public void exportAsDrag(JComponent c, java.awt.event.InputEvent e, int action) {
             if (previous != null) {
                 previous.exportAsDrag(c, e, action);

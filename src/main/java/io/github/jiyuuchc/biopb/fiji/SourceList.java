@@ -78,7 +78,10 @@ public final class SourceList implements AutoCloseable {
     private volatile Map<String, CatalogClient.Level> levels = Collections.emptyMap();
     private volatile boolean lazy;
     private volatile Set<String> droppedRoots = Collections.emptySet();
-    private volatile boolean rootsStale = true; // the dropped roots are read again at the next lazy re-list
+    // The dropped roots are read again at the next lazy re-list when marked is ahead of read. A counter,
+    // not a flag: a mark made while a read is in flight is newer than that read and must not be cleared by it.
+    private final java.util.concurrent.atomic.AtomicInteger rootsMarked = new java.util.concurrent.atomic.AtomicInteger(1);
+    private volatile int rootsRead;
     private boolean lazyUnsupported;
 
     private volatile Supplier<? extends Collection<String>> openKeys = Collections::emptySet;
@@ -165,7 +168,7 @@ public final class SourceList implements AutoCloseable {
             levels = Collections.emptyMap();
             lazy = false;
             droppedRoots = Collections.emptySet();
-            rootsStale = true;
+            markRootsStale();
             lazyUnsupported = false;
             lastCount = null;
             lastGeneration = null;
@@ -193,7 +196,7 @@ public final class SourceList implements AutoCloseable {
             before = levels;
         }
         if (tryLevels && refreshLevels(client, startEpoch, before)) {
-            if (rootsStale) {
+            if (rootsMarked.get() != rootsRead) {
                 refreshDroppedRoots(client, startEpoch);
             }
             return sources;
@@ -217,6 +220,7 @@ public final class SourceList implements AutoCloseable {
      * stale, so it is asked again): the tree then has no remove action on a folder.
      */
     private void refreshDroppedRoots(CatalogClient client, int startEpoch) {
+        int marked = rootsMarked.get();
         try {
             Set<String> roots = new HashSet<>();
             for (Map<String, Object> row : client.query(DND_ROOTS_SQL)) {
@@ -228,12 +232,19 @@ public final class SourceList implements AutoCloseable {
             synchronized (lock) {
                 if (startEpoch == epoch && now == client) {
                     droppedRoots = Collections.unmodifiableSet(roots);
-                    rootsStale = false;
+                    if (rootsMarked.get() == marked) { // not marked again while the read was out
+                        rootsRead = marked;
+                    }
                 }
             }
         } catch (IOException | RuntimeException e) {
             LOG.log(Level.FINE, "Reading the dropped roots failed", e);
         }
+    }
+
+    /** The next lazy re-list reads the dropped roots again. */
+    void markRootsStale() {
+        rootsMarked.incrementAndGet();
     }
 
     /** The {@code dnd://} roots the server holds, as of the last re-list (lazy listing only). */
@@ -491,7 +502,7 @@ public final class SourceList implements AutoCloseable {
      * either way; only the re-list is skipped (a replaced connection must not be listed into).
      */
     private void afterChange(CatalogClient client, int startEpoch, String what) {
-        rootsStale = true;
+        markRootsStale();
         synchronized (lock) {
             try {
                 checkCurrent(client, startEpoch, connection.get());
@@ -641,7 +652,7 @@ public final class SourceList implements AutoCloseable {
                     || !sameValue(generation, lastGeneration);
         }
         if (changed) {
-            rootsStale = true; // another client may have added or removed a drop
+            markRootsStale(); // another client may have added or removed a drop
         }
         if (changed && relist(startEpoch)) {
             synchronized (lock) {

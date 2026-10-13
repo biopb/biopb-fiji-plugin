@@ -76,10 +76,11 @@ public final class SourceMessages {
     }
 
     /** The question before removing a dropped source. */
-    public static String confirmRemove(String displayName) {
+    public static String confirmRemove(String displayName, String rootUrl) {
         return "Remove “" + displayName + "” from the browser?\n\n"
-                + "This unregisters the drag-dropped source(s) from the tensor server. "
-                + "The underlying files on disk are not deleted.";
+                + "This unregisters every source the server holds under " + rootUrl + " (added by drag-drop or "
+                + "the Add button). Other sources, even in a folder of the same name, are not touched, and the "
+                + "underlying files on disk are not deleted.";
     }
 
     /** The status line after a removal. */

@@ -40,6 +40,14 @@ public class DroppedSourcesTest {
     }
 
     @Test
+    public void aFolderWhoseNameOnlyStartsLikeARootIsNotThatRoot() {
+        java.util.Set<String> roots = new HashSet<>(Collections.singleton("dnd://scans2"));
+        assertNull(DroppedSources.removeRootForFolder("scans", roots)); // same prefix, other root
+        assertNull(DroppedSources.removeRootForFolder("Scans", roots));
+        assertEquals("dnd://scans2", DroppedSources.removeRootForFolder("scans2", roots));
+    }
+
+    @Test
     public void aSourceIsRemovableOnlyWhenItIsTheRoot() {
         assertEquals("dnd://x.tif", DroppedSources.removeRootForSource("dnd://x.tif"));
         assertNull(DroppedSources.removeRootForSource("dnd://dir/x.tif"));

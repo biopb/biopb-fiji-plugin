@@ -98,7 +98,7 @@ public class SourceEditorTest {
     }
 
     /** Records what the editor asks and shows; answers questions from {@code yes}. */
-    static final class FakePrompts implements SourceEditor.Prompts {
+    static class FakePrompts implements SourceEditor.Prompts {
         final List<String> asked = new CopyOnWriteArrayList<>();
         final List<String> infos = new CopyOnWriteArrayList<>();
         final List<String> errors = new CopyOnWriteArrayList<>();
@@ -275,6 +275,31 @@ public class SourceEditorTest {
     }
 
     @Test
+    public void aMarkMadeWhileTheRootsAreBeingReadSurvivesTheRead() throws Exception {
+        SourceList[] self = new SourceList[1];
+        boolean[] marked = {false};
+        Fake f = new Fake() {
+            @Override public List<Map<String, Object>> query(String sql) {
+                if (sql.contains("regexp_extract")) {
+                    rootQueries++;
+                    if (!marked[0]) {
+                        marked[0] = true;
+                        self[0].markRootsStale(); // something changed while this read is out
+                    }
+                }
+                return super.query(sql);
+            }
+        };
+        self[0] = new SourceList(f);
+        self[0].refresh();
+        assertEquals(1, rootQueries);
+        self[0].refresh(); // the read above is older than the mark: read again
+        assertEquals(2, rootQueries);
+        self[0].refresh(); // and now it is current
+        assertEquals(2, rootQueries);
+    }
+
+    @Test
     public void listReadsDroppedRoots() throws Exception {
         fake.droppedRows = Arrays.asList(Collections.<String, Object>singletonMap("root", "dnd://scans"),
                 Collections.<String, Object>singletonMap("root", ""));
@@ -416,6 +441,81 @@ public class SourceEditorTest {
         edt(() -> editor.drop(dir.getPath()));
         until(this::idleQuiet);
         assertEquals(1, fake.registered.size());
+    }
+
+    @Test
+    public void aSecondDropOrAddCannotStartUnderTheFirstOnesQuestion() throws Exception {
+        File dir = tmp.newFolder("big2");
+        edt(() -> editor.setSizer(p -> true));
+        List<Boolean> addEnabledInPrompt = new CopyOnWriteArrayList<>();
+        SourceEditor.Prompts nested = new SourceEditor.Prompts() {
+            @Override public boolean confirm(String title, String message, boolean defaultYes) {
+                addEnabledInPrompt.add(editor.addButtonForTest().isEnabled());
+                editor.drop("/data/other"); // dropped while the question is up
+                editor.setChooser(() -> new File("/data/picked"));
+                editor.addButtonForTest().doClick();
+                assertTrue(editor.isBusy());
+                return true;
+            }
+
+            @Override public void info(String t, String m) { }
+            @Override public void error(String t, String m) { }
+        };
+        edt(() -> editor.setPrompts(nested));
+        edt(() -> editor.drop(dir.getPath()));
+        until(this::idleQuiet);
+        assertEquals(Arrays.asList(false), addEnabledInPrompt);
+        assertEquals(Arrays.asList(dir.getPath()), fake.registered); // the confirmed add was not abandoned
+    }
+
+    @Test
+    public void ifTheSizeCannotBeReadTheUserIsAsked() throws Exception {
+        edt(() -> editor.setSizer(p -> { throw new IllegalStateException("walk failed"); }));
+        edt(() -> editor.drop("/data/x"));
+        until(this::idleQuiet);
+        assertEquals(Arrays.asList("Add large folder?"), prompts.asked);
+    }
+
+    @Test
+    public void canChangeFollowsTheGate() throws Exception {
+        edt(() -> assertTrue(editor.canChange()));
+        fake.release = new CountDownLatch(1);
+        edt(() -> editor.drop("/data/x"));
+        assertTrue(fake.started.await(5, TimeUnit.SECONDS));
+        edt(() -> assertFalse(editor.canChange()));
+        fake.release.countDown();
+        until(this::idleQuiet);
+        url = "grpc://example.com:1";
+        edt(() -> assertFalse(editor.canChange()));
+    }
+
+    @Test
+    public void theConfirmationNamesTheRootBeingDeregistered() throws Exception {
+        final String[] text = new String[1];
+        edt(() -> editor.setPrompts(new FakePrompts() {
+            @Override public boolean confirm(String title, String message, boolean defaultYes) {
+                text[0] = message;
+                return false;
+            }
+        }));
+        edt(() -> editor.remove("dnd://scans", "scans"));
+        assertTrue(text[0], text[0].contains("dnd://scans"));
+        assertTrue(text[0].contains("same name"));
+    }
+
+    @Test
+    public void theHandlerKeepsTheComponentsOwnCopy() throws Exception {
+        javax.swing.JTree tree = new javax.swing.JTree();
+        edt(() -> {
+            tree.setSelectionRow(1);
+            editor.acceptDropsOn(tree);
+            java.awt.datatransfer.Clipboard clip = new java.awt.datatransfer.Clipboard("test");
+            javax.swing.TransferHandler h = tree.getTransferHandler();
+            assertTrue((h.getSourceActions(tree) & javax.swing.TransferHandler.COPY) != 0);
+            h.exportToClipboard(tree, clip, javax.swing.TransferHandler.COPY);
+            assertNotNull(clip.getContents(null));
+            assertTrue(clip.getContents(null).isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor));
+        });
     }
 
     @Test

@@ -107,7 +107,8 @@ Against a server **on this machine** (`localhost`, `127.*`, `::1`) you can add d
 **drag a file or folder** onto the browser, or press **Add folder/file…**. The server then
 discovers and catalogs what is under it. The line beside the button says when adding is
 unavailable and why (not connected, or a remote server: a path is only meaningful to a server that
-shares your disk). One item per drop; a multi-selection is refused.
+shares your disk). "Local" means a loopback address, so a remote server reached through an SSH tunnel
+to `localhost` is treated as local too. One item per drop; a multi-selection is refused.
 
 - A folder with more than 2000 entries asks first (a guard against dropping a home folder).
 - A path inside **OneDrive** warns that cloud-synced sources are experimental, and if you go ahead the

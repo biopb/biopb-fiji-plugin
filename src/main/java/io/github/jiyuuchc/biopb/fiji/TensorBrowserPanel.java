@@ -539,7 +539,6 @@ public class TensorBrowserPanel extends JPanel {
         closeMetadataDialogs();
         metadataReads.shutdownNow();
         forgetResolve();
-        editor.connectionChanged();
         connectGen++;
         searchGen++;
         inFlight = false;
@@ -547,6 +546,7 @@ public class TensorBrowserPanel extends JPanel {
         Thread closing = release(connection, list);
         connection = null;
         list = null;
+        editor.connectionChanged();
         folderNodes = new HashMap<>();
         if (closing != null && !SwingUtilities.isEventDispatchThread()) {
             try { // a short wait, so a JVM exit right after rarely cuts the close off
@@ -932,7 +932,7 @@ public class TensorBrowserPanel extends JPanel {
         tree.setSelectionPath(path);
         JPopupMenu menu = menuFor(n);
         String removeRoot = removeRootOf(path);
-        if (removeRoot != null) {
+        if (removeRoot != null && editor.canChange()) { // omitted while an add or removal runs, or against a remote server
             if (menu == null) {
                 menu = new JPopupMenu();
             } else {
