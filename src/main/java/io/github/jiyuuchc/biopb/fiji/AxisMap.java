@@ -44,7 +44,7 @@ public final class AxisMap {
         if (n < 2) {
             throw new AxisMappingException(AxisMappingException.Reason.OTHER, "Tensor has " + n + " dimension(s); at least y and x are required");
         }
-        if (override != null && !override.trim().isEmpty()) {
+        if (hasOverride) {
             String o = override.trim().toLowerCase(Locale.ROOT);
             if (o.length() != n) {
                 throw new AxisMappingException(AxisMappingException.Reason.INVALID_OVERRIDE, "Axis override \"" + override + "\" has " + o.length()

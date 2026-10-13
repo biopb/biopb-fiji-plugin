@@ -26,6 +26,8 @@ import javax.swing.SwingWorker;
 public class TensorBrowserController implements TensorBrowserListener {
     /** ImagePlus property holding the id of the connection an image was opened through. */
     public static final String CONNECTION_PROPERTY = "biopb.connection";
+    /** ImagePlus property holding the {@link RefCountedConnection} itself (kept alive by the image's reference). */
+    public static final String CONNECTION_REF_PROPERTY = "biopb.connection.ref";
     /** Most times the axis prompt is shown for one open. */
     static final int MAX_AXIS_ATTEMPTS = 3;
 
@@ -88,7 +90,9 @@ public class TensorBrowserController implements TensorBrowserListener {
         /** Drops the image's reference, once. */
         void release() {
             if (released.compareAndSet(false, true)) {
-                ImagePlus.removeImageListener(this);
+                // ImagePlus.notifyListeners iterates the static list by index: removing ourselves
+                // inside the callback could make it skip the next listener.
+                java.awt.EventQueue.invokeLater(() -> ImagePlus.removeImageListener(this));
                 conn.close();
             }
         }
@@ -160,7 +164,7 @@ public class TensorBrowserController implements TensorBrowserListener {
 
     private static boolean matches(ImagePlus imp, String arrayId, String connId) {
         TensorOpener.LevelInfo info = TensorOpener.LevelInfo.of(imp);
-        return info != null && info.getArrayId().equals(arrayId)
+        return info != null && imp.getStack() instanceof TensorVirtualStack && info.getArrayId().equals(arrayId)
                 && connId.equals(imp.getProperty(CONNECTION_PROPERTY));
     }
 
@@ -173,6 +177,14 @@ public class TensorBrowserController implements TensorBrowserListener {
 
     private void end() { busy = Math.max(0, busy - 1); }
 
+    /** A request ended without a message of its own: stop the spinner and clear the "working" text. */
+    private void finish() {
+        end();
+        if (busy == 0) {
+            ui.status(" ", false);
+        }
+    }
+
     @Override
     public void openRequested(String arrayId, int level) {
         openWith(arrayId, level, null, 0);
@@ -181,13 +193,14 @@ public class TensorBrowserController implements TensorBrowserListener {
     private static String key(String arrayId, int level) { return arrayId + "@" + level; }
 
     private void openWith(String arrayId, int level, String axisOverride, int axisAttempts) {
-        RefCountedConnection conn = connection.get();
+                RefCountedConnection conn = connection.get();
         String what = arrayId + (level > 0 ? " [level " + level + "]" : "");
         if (conn == null || !conn.acquire()) {
             ui.error("Tensor Browser", "Not connected to a server.");
             return;
         }
-        if (!inFlight.add(key(arrayId, level))) {
+        final String flightKey = conn.id() + "|" + key(arrayId, level);
+        if (!inFlight.add(flightKey)) {
             conn.close();
             status(what + " is already being opened");
             return;
@@ -197,31 +210,40 @@ public class TensorBrowserController implements TensorBrowserListener {
             @Override protected ImagePlus doInBackground() {
                 ImagePlus imp = opener.open(conn.flight(), arrayId, level, axisOverride);
                 imp.setProperty(CONNECTION_PROPERTY, conn.id());
+                imp.setProperty(CONNECTION_REF_PROPERTY, conn);
+                // Read the first planes here, so show() on the EDT does no network I/O.
+                imp.getProcessor();
+                if (imp instanceof ij.CompositeImage) {
+                    ((ij.CompositeImage) imp).updateImage();
+                }
                 return imp;
             }
 
             @Override protected void done() {
-                inFlight.remove(key(arrayId, level));
-                end();
+                inFlight.remove(flightKey);
                 ImagePlus imp = null;
                 Throwable failure = null;
                 try {
                     imp = get();
                 } catch (CancellationException e) {
+                    end();
                     conn.close();
                     status("Opening " + what + " cancelled");
                     return;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    finish();
                     conn.close();
                     return;
                 } catch (ExecutionException e) {
                     failure = e.getCause() != null ? e.getCause() : e;
                 }
                 if (connection.get() != conn) { // closed or reconnected meanwhile: drop the result
+                    finish();
                     conn.close();
                     return;
                 }
+                end();
                 if (failure != null) {
                     conn.close();
                     status("Could not open " + what);
@@ -254,7 +276,7 @@ public class TensorBrowserController implements TensorBrowserListener {
                 if (f.suggestedLevel > level) {
                     if (ui.confirm("Plane too large",
                             f.message + "\n\nOpen pyramid level " + f.suggestedLevel + " instead?")) {
-                        openWith(arrayId, f.suggestedLevel, axisOverride, 0);
+                        openWith(arrayId, f.suggestedLevel, axisOverride, attempts);
                     }
                 } else {
                     ui.error("Plane too large", f.message);
@@ -278,24 +300,30 @@ public class TensorBrowserController implements TensorBrowserListener {
 
     @Override
     public void roisRequested(String arrayId) {
-        RefCountedConnection conn = connection.get();
-        if (conn == null || !conn.acquire()) {
+        RefCountedConnection current = connection.get();
+        if (current == null) {
             ui.error("Load ROIs", "Not connected to a server.");
             return;
         }
         List<ImagePlus> all = images.all();
         ImagePlus cur = images.current();
-        ImagePlus imp = pick(cur, all, arrayId, conn.id());
+        ImagePlus imp = pick(cur, all, arrayId, current.id());
         if (imp == null) {
-            conn.close();
             ui.error("Load ROIs", "Open '" + arrayId + "' as an image first; ROIs are loaded onto the open image.");
             return;
         }
         int matching = 0;
         for (ImagePlus i : all) {
-            if (matches(i, arrayId, conn.id())) {
+            if (matches(i, arrayId, current.id())) {
                 matching++;
             }
+        }
+        // Read through the connection the image itself holds, whatever the panel does meanwhile.
+        Object held = imp.getProperty(CONNECTION_REF_PROPERTY);
+        RefCountedConnection conn = held instanceof RefCountedConnection ? (RefCountedConnection) held : current;
+        if (!conn.acquire()) {
+            ui.error("Load ROIs", "The image's server connection is closed.");
+            return;
         }
         TensorOpener.LevelInfo info = TensorOpener.LevelInfo.of(imp);
         String note = matching > 1 ? " (" + matching + " images open; using the "
@@ -308,25 +336,24 @@ public class TensorBrowserController implements TensorBrowserListener {
             }
 
             @Override protected void done() {
-                end();
                 RoiLoader.Result r = null;
                 Throwable failure = null;
                 try {
                     r = get();
                 } catch (CancellationException e) {
+                    finish();
                     conn.close();
                     return;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    finish();
                     conn.close();
                     return;
                 } catch (ExecutionException e) {
                     failure = e.getCause() != null ? e.getCause() : e;
                 }
                 conn.close(); // the read is over
-                if (connection.get() != conn) {
-                    return; // stale
-                }
+                end();
                 if (failure != null) {
                     status("Could not load ROIs");
                     ui.error("Load ROIs", OpenFailure.describe(failure));

@@ -56,8 +56,13 @@ public class TensorBrowserControllerTest {
 
     /** An image whose close notification the test can fire (as ImageWindow.close() does). */
     static final class Img extends ImagePlus {
-        Img(String t) { super(t, new ByteProcessor(4, 4)); }
+        Img(String t) { super(t, new TensorVirtualStack(new FakePlaneSource(1, 1, 1))); }
         void fireClosed() { notifyListeners(CLOSED); }
+    }
+
+    static ImagePlus withRef(ImagePlus imp, RefCountedConnection c) {
+        imp.setProperty(TensorBrowserController.CONNECTION_REF_PROPERTY, c);
+        return imp;
     }
 
     static ImagePlus image(String id, int level) { return image(id, level, "conn-test"); }
@@ -121,6 +126,53 @@ public class TensorBrowserControllerTest {
         edt(() -> { });
         await(() -> closes.get() == 1);
         assertEquals(1, closes.get());
+    }
+
+    @Test
+    public void twoImagesBothReleaseTheirReferences() throws Exception {
+        TensorBrowserController c = controller((cl, id, lvl, ax) -> image(id, lvl));
+        open(c, "a", 0);
+        open(c, "b", 0);
+        await(() -> shown.size() == 2);
+        assertEquals(3, conn.refCount());
+        conn.close();
+        edt(() -> { ((Img) shown.get(0)).fireClosed(); ((Img) shown.get(1)).fireClosed(); });
+        edt(() -> { });
+        await(() -> closes.get() == 1);
+        assertEquals(0, conn.refCount());
+    }
+
+    @Test
+    public void dropConnectionClearsBusyStatus() throws Exception {
+        CountDownLatch gate = new CountDownLatch(1);
+        open(controller((cl, id, lvl, ax) -> {
+            try { gate.await(); } catch (InterruptedException e) { throw new IllegalStateException(e); }
+            return image(id, lvl);
+        }), "a", 0);
+        active = null;
+        gate.countDown();
+        await(() -> log.contains("status: "));
+        assertEquals(" ", lastStatus());
+    }
+
+    String lastStatus() {
+        for (int i = log.size() - 1; i >= 0; i--) {
+            if (log.get(i).startsWith("status:")) return log.get(i).substring(7);
+        }
+        return null;
+    }
+
+    @Test
+    public void axisAttemptsPersistAcrossCoarserLevelReopen() throws Exception {
+        axesAnswers = new CopyOnWriteArrayList<>(Arrays.asList("q1", "q2", "q3", "never"));
+        open(controller((c, id, lvl, ax) -> {
+            opens.add(lvl + ":" + ax);
+            if (lvl == 0 && ax != null) throw new PlaneTooLargeException("big", 9, 1, 1);
+            throw new AxisMappingException(AxisMappingException.Reason.INVALID_OVERRIDE, "bad");
+        }), "a", 0);
+        // level 0 needs axes? first open has ax==null at level 0 -> INVALID by the lambda; q1 -> too large -> level 1
+        await(() -> log.contains("error:Could not open a"));
+        assertEquals(1, axesAnswers.size());
     }
 
     @Test
@@ -268,6 +320,34 @@ public class TensorBrowserControllerTest {
         assertNull(TensorBrowserController.pick(null, Arrays.asList(b), "a", "c"));
         assertNull(TensorBrowserController.pick(null, Arrays.asList(a0), "a", "other"));
         assertNull(TensorBrowserController.pick(new ImagePlus(), Arrays.asList(new ImagePlus()), "a", "c"));
+    }
+
+    @Test
+    public void copiedPropertiesOnAPlainImageDoNotMatch() {
+        ImagePlus dup = new ImagePlus("dup", new ByteProcessor(4, 4));
+        ImagePlus real = image("a", 0, "c");
+        for (String k : new String[] {TensorOpener.LevelInfo.PROPERTY, TensorBrowserController.CONNECTION_PROPERTY}) {
+            dup.setProperty(k, real.getProperty(k));
+        }
+        assertNull(TensorBrowserController.pick(dup, Arrays.asList(dup), "a", "c"));
+    }
+
+    @Test
+    public void roisStillApplyWhenPanelConnectionGoesAwayMidLoad() throws Exception {
+        ImagePlus imp = withRef(image("a", 0, conn.id()), conn);
+        images.all.add(imp);
+        CountDownLatch gate = new CountDownLatch(1);
+        List<TensorFlightClient> used = new CopyOnWriteArrayList<>();
+        fetcher = (c, id, i, info) -> {
+            try { gate.await(); } catch (InterruptedException e) { throw new IOException(e); }
+            return new RoiLoader.Result(new ArrayList<ij.gui.Roi>(), Collections.<String, Integer>emptyMap(), 0, false);
+        };
+        TensorBrowserController c = controller(null);
+        edt(() -> c.roisRequested("a"));
+        active = null; // window closed / reconnected
+        gate.countDown();
+        await(() -> log.stream().anyMatch(l -> l.contains("Loaded 0 ROIs")));
+        assertEquals(1, conn.refCount());
     }
 
     @Test

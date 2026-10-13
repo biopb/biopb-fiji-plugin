@@ -43,13 +43,16 @@ jobs:
       - name: Fiji Latest version stamp
         id: stamp
         run: |
-          lm=$(curl -fsSIL "$FIJI_URL" | tr -d '\r' | awk -F': ' 'tolower($1)=="last-modified"{v=$2} END{print v}') || lm=""
+          set -eo pipefail
+          # A failing HEAD request fails the job; only a missing header falls back.
+          headers=$(curl -fsSIL "$FIJI_URL" | tr -d '\r')
+          lm=$(echo "$headers" | awk -F': ' 'tolower($1)=="last-modified"{v=$2} END{print v}')
           if [ -n "$lm" ]; then
             echo "Fiji Last-Modified: $lm"
             key=$(echo "$lm" | tr -c 'A-Za-z0-9\n' '-')
           else
             key="unknown-week-$(date +%G-%V)"
-            echo "::warning::Could not read Last-Modified for $FIJI_URL; caching Fiji by ISO week ($key)"
+            echo "::warning::No Last-Modified header for $FIJI_URL; caching Fiji by ISO week ($key)"
           fi
           echo "key=$key" >> "$GITHUB_OUTPUT"
       - name: Cache Fiji
@@ -78,5 +81,10 @@ jobs:
       # Copies the plugin jar and the dependencies Fiji lacks into the install.
       - name: Install plugin into Fiji
         run: mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
-      - name: Smoke test
+      - name: Smoke test (headless)
         run: ./Fiji.app/fiji-linux-x64 --headless --run .github/scripts/smoke.groovy
+      # Builds the real window in Fiji's GUI on a virtual display.
+      - name: Smoke test (GUI, xvfb)
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+          xvfb-run -a ./Fiji.app/fiji-linux-x64 --run .github/scripts/smoke-gui.groovy
