@@ -49,21 +49,43 @@ final class WindowPrefs {
         }
     }
 
+    /** Writes the bounds on a background thread (the preferences store may block on disk). */
+    void saveAsync(Rectangle r) {
+        Thread t = new Thread(() -> save(r), "biopb-window-prefs");
+        t.setDaemon(true);
+        t.start();
+    }
+
     /**
-     * {@code saved} grown to at least {@code min} and, if too little of it is visible on {@code screens}
-     * (a monitor that is gone), {@code null}: the caller then lets the platform place it.
+     * {@code saved} grown to at least {@code min}, then fitted into the screen it overlaps most: shrunk to
+     * that screen's usable area and moved inside it, so the title bar is reachable.
+     *
+     * @param screens the usable areas (screen bounds minus taskbars)
+     * @return the fitted bounds, or {@code null} if {@code saved} is {@code null} or overlaps no screen
+     *     (a monitor that is gone): the caller then lets the platform place the window
      */
     static Rectangle usable(Rectangle saved, java.awt.Dimension min, Rectangle[] screens) {
         if (saved == null) {
             return null;
         }
         Rectangle r = new Rectangle(saved.x, saved.y, Math.max(saved.width, min.width), Math.max(saved.height, min.height));
+        Rectangle best = null;
+        long bestArea = 0;
         for (Rectangle s : screens) {
             Rectangle v = s.intersection(r);
-            if (v.width >= 100 && v.height >= 50) { // enough to grab the title bar
-                return r;
+            long area = v.isEmpty() ? 0 : (long) v.width * v.height;
+            if (area > bestArea) {
+                best = s;
+                bestArea = area;
             }
         }
-        return null;
+        if (best == null) {
+            return null;
+        }
+        r.width = Math.min(r.width, best.width);
+        r.height = Math.min(r.height, best.height);
+        r.x = Math.max(best.x, Math.min(r.x, best.x + best.width - r.width));
+        r.y = Math.max(best.y, Math.min(r.y, best.y + best.height - r.height));
+        return r;
     }
 }

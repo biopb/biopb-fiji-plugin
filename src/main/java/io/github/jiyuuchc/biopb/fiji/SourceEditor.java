@@ -88,20 +88,36 @@ final class SourceEditor {
     private final Host host;
     private final JPanel view = new JPanel(new BorderLayout(6, 0));
     private final JButton addButton = new JButton("Add folder/file…");
+    private static final int MAX_HINT_LINES = 3;
     private final JTextArea hint = new JTextArea(" ") { // wraps at word boundaries instead of being cut off
         private static final long serialVersionUID = 1L;
 
         @Override public java.awt.Dimension getPreferredSize() {
-            if (getWidth() > 0) { // the height of wrapped text depends on the width it is laid out at
-                setSize(getWidth(), Short.MAX_VALUE);
-            }
-            return super.getPreferredSize();
+            // The width the row gives it (what is left of the row beside the buttons) decides the line count.
+            java.awt.FontMetrics fm = getFontMetrics(getFont());
+            java.awt.Insets in = getInsets();
+            int avail = hintWidth() - in.left - in.right;
+            int lines = Math.min(MAX_HINT_LINES, TextWrap.lines(getText(), avail, fm::stringWidth));
+            return new java.awt.Dimension(HINT_PREFERRED_WIDTH, lines * fm.getHeight() + in.top + in.bottom);
         }
 
-        @Override public java.awt.Dimension getMinimumSize() { // may shrink in width, but keeps the height its wrapped text needs
+        @Override public java.awt.Dimension getMinimumSize() { // may shrink in width, keeps the height its text needs
             return new java.awt.Dimension(0, getPreferredSize().height);
         }
     };
+    private static final int HINT_PREFERRED_WIDTH = 120;
+
+    /** The width the hint has on its row: the row minus the buttons beside it. */
+    private int hintWidth() {
+        int w = view.getWidth() - view.getInsets().left - view.getInsets().right;
+        BorderLayout bl = (BorderLayout) view.getLayout();
+        for (JComponent c : new JComponent[] {addButton, cancelButton}) {
+            if (c.isVisible()) {
+                w -= c.getPreferredSize().width + bl.getHgap();
+            }
+        }
+        return w;
+    }
     private final JButton cancelButton = new JButton("Cancel add");
     private Prompts prompts = new SwingPrompts();
     private java.util.function.Predicate<String> sizer = CloudDrop::exceedsEntryThreshold;
@@ -125,16 +141,13 @@ final class SourceEditor {
         hint.setFocusable(false);
         hint.setOpaque(false);
         hint.setBorder(javax.swing.BorderFactory.createEmptyBorder(0, 4, 0, 0));
-        hint.addComponentListener(new java.awt.event.ComponentAdapter() {
+        view.addComponentListener(new java.awt.event.ComponentAdapter() {
             private int lastWidth = -1;
 
-            @Override public void componentResized(java.awt.event.ComponentEvent e) { // re-wrap: the height depends on the width
-                if (hint.getWidth() != lastWidth) {
-                    lastWidth = hint.getWidth();
-                    SwingUtilities.invokeLater(() -> {
-                        hint.invalidate();
-                        view.revalidate();
-                    });
+            @Override public void componentResized(java.awt.event.ComponentEvent e) { // the line count depends on the width
+                if (view.getWidth() != lastWidth) {
+                    lastWidth = view.getWidth();
+                    SwingUtilities.invokeLater(view::revalidate);
                 }
             }
         });

@@ -6,6 +6,7 @@ import java.awt.Dimension;
 import java.awt.GraphicsDevice;
 import java.awt.GraphicsEnvironment;
 import java.awt.Rectangle;
+import java.awt.Toolkit;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.function.Supplier;
@@ -29,6 +30,7 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
     private final WindowPrefs prefs = new WindowPrefs();
     private final javax.swing.Timer saveBounds = new javax.swing.Timer(500, e -> rememberBounds());
     private boolean placed; // the position came from the saved bounds
+    private Rectangle initial; // where the window first settled; only a change from it is the user's
 
     private TensorBrowserWindow(TensorBrowserPanel panel) {
         super("BioPB Tensor Browser");
@@ -48,16 +50,19 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
         restoreBounds();
         saveBounds.setRepeats(false);
         addComponentListener(new java.awt.event.ComponentAdapter() {
-            @Override public void componentResized(java.awt.event.ComponentEvent e) { saveBounds.restart(); }
+            @Override public void componentResized(java.awt.event.ComponentEvent e) { changed(); }
 
-            @Override public void componentMoved(java.awt.event.ComponentEvent e) { saveBounds.restart(); }
+            @Override public void componentMoved(java.awt.event.ComponentEvent e) { changed(); }
         });
         panel.addListener(new TensorBrowserController(panel::getSharedConnection, this));
         addWindowListener(new WindowAdapter() {
-            @Override public void windowClosing(WindowEvent e) { rememberBounds(); }
+            @Override public void windowOpened(WindowEvent e) {
+                SwingUtilities.invokeLater(() -> initial = getBounds()); // after the initial placement events
+            }
 
-            @Override public void windowClosed(WindowEvent e) {
+            @Override public void windowClosed(WindowEvent e) { // also by dispose()
                 saveBounds.stop();
+                rememberBounds();
                 panel.dispose();
                 if (instance == TensorBrowserWindow.this) {
                     instance = null;
@@ -66,16 +71,18 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
         });
     }
 
-    /** Uses the size and position of the last session, when they are still on a screen. */
+    /** Uses the size and position of the last session, fitted to the screens now attached. */
     private void restoreBounds() {
-        Rectangle[] screens;
         if (GraphicsEnvironment.isHeadless()) {
             return;
         }
         GraphicsDevice[] devices = GraphicsEnvironment.getLocalGraphicsEnvironment().getScreenDevices();
-        screens = new Rectangle[devices.length];
+        Rectangle[] screens = new Rectangle[devices.length];
         for (int i = 0; i < devices.length; i++) {
-            screens[i] = devices[i].getDefaultConfiguration().getBounds();
+            java.awt.GraphicsConfiguration gc = devices[i].getDefaultConfiguration();
+            Rectangle b = gc.getBounds();
+            java.awt.Insets in = Toolkit.getDefaultToolkit().getScreenInsets(gc); // taskbars
+            screens[i] = new Rectangle(b.x + in.left, b.y + in.top, b.width - in.left - in.right, b.height - in.top - in.bottom);
         }
         Rectangle r = WindowPrefs.usable(prefs.load(), MIN_SIZE, screens);
         if (r != null) {
@@ -84,10 +91,18 @@ public final class TensorBrowserWindow extends JFrame implements TensorBrowserCo
         }
     }
 
-    /** Saves the bounds of a normal (not maximised or minimised) window. */
+    /** A move or resize: remember it shortly, once the window has settled and it differs from there. */
+    private void changed() {
+        if (initial != null) {
+            saveBounds.restart();
+        }
+    }
+
+    /** Saves the bounds of a normal (not maximised or minimised) window that the user has moved or resized. */
     private void rememberBounds() {
-        if (isShowing() && (getExtendedState() & (MAXIMIZED_BOTH | ICONIFIED)) == 0) {
-            prefs.save(getBounds());
+        Rectangle b = getBounds();
+        if (initial != null && !b.equals(initial) && (getExtendedState() & (MAXIMIZED_BOTH | ICONIFIED)) == 0) {
+            prefs.saveAsync(b);
         }
     }
 
