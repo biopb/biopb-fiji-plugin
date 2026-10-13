@@ -17,6 +17,25 @@ the server when you look at them.
 
 - **Update site** (once published): in Fiji, *Help > Update... > Manage update
   sites*, tick the BioPB site, apply the changes and restart Fiji.
+- **From Maven Central** (until the update site is live; needs Maven and a published release).
+  Save this as `pom.xml` in an empty directory, set `VERSION` to the release, and run the
+  command below. The parent pom pins the same dependency versions Fiji ships, and
+  `includeArtifactIds` limits the copy to the jars a pristine Fiji lacks (never overwrite
+  Fiji's own netty/grpc/protobuf):
+
+      <project xmlns="http://maven.apache.org/POM/4.0.0">
+        <modelVersion>4.0.0</modelVersion>
+        <parent><groupId>org.scijava</groupId><artifactId>pom-scijava</artifactId><version>43.0.0</version></parent>
+        <groupId>local</groupId><artifactId>biopb-fiji-install</artifactId><version>1</version>
+        <dependencies>
+          <dependency><groupId>io.github.jiyuuchc</groupId><artifactId>biopb-fiji-plugin</artifactId><version>VERSION</version></dependency>
+        </dependencies>
+      </project>
+
+      mvn dependency:copy-dependencies -DoutputDirectory=/path/to/Fiji.app/jars \
+        -DincludeArtifactIds=arrow-format,arrow-memory-core,arrow-memory-netty,arrow-memory-netty-buffer-patch,arrow-vector,biopb,biopb-fiji-plugin,flatbuffers-java,flight-core,grpc-context,grpc-netty,javax.annotation-api,netty-codec-socks,netty-handler-proxy
+
+  Restart Fiji. To upgrade, delete the old `biopb-*.jar` files from `jars/` first.
 - **Manual**: build and install into a Fiji.app. This copies the plugin jar and
   the dependencies Fiji lacks (Arrow, Flight, grpc-netty, ...) into the
   install:
