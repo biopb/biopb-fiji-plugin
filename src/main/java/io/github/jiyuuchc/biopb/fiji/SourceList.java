@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -343,6 +344,61 @@ public final class SourceList implements AutoCloseable {
             }
         }
         return Collections.unmodifiableMap(out);
+    }
+
+    // --- the server's verbs --------------------------------------------------
+
+    /** Whether a source row is resolved; a row without the column reads as resolved. */
+    public static boolean isResolved(Map<String, Object> row) {
+        return !Boolean.FALSE.equals(row.get("is_resolved"));
+    }
+
+    /**
+     * Resolves a source (a cloud one is downloaded, which can take minutes: call off the UI thread)
+     * and re-lists. The row the resolve committed is merged into {@link #getSources()} if it is
+     * resolved and the held entry is not (or replaced while the held entry is itself still unresolved,
+     * so a new reason, say cloud to failed, shows), so a re-list that still shows the source unresolved (a
+     * pending source registers without moving the count) cannot undo it. A failing re-list is
+     * ignored: the resolve itself succeeded.
+     *
+     * @param onProgress receives the server's heartbeats on the calling thread, or {@code null}
+     * @param shouldCancel polled at each heartbeat; true stops the resolve, or {@code null}
+     * @return the committed row, merged or not
+     * @throws ResolveCancelledException if {@code shouldCancel} stopped it
+     * @throws IllegalStateException if not connected, or the connection changed meanwhile (nothing is merged)
+     * @throws IOException if the resolve fails
+     */
+    public Map<String, Object> resolve(String sourceId, Consumer<CatalogClient.ResolveProgress> onProgress,
+            BooleanSupplier shouldCancel) throws IOException {
+        CatalogClient client = client();
+        int startEpoch = currentEpoch();
+        Map<String, Object> row = client.resolveSource(sourceId, onProgress, shouldCancel);
+        if (row == null) {
+            throw new IOException("resolve of '" + sourceId + "' returned no catalog row");
+        }
+        synchronized (lock) { // a replaced connection must not be re-listed into
+            checkCurrent(client, startEpoch, connection.get());
+        }
+        try {
+            refresh();
+        } catch (IOException | RuntimeException e) { // a connection replaced meanwhile is caught by the check below
+            LOG.log(Level.FINE, "Re-list after resolving '" + sourceId + "' failed", e);
+        }
+        Map<String, Object> committed = Collections.unmodifiableMap(row);
+        synchronized (lock) {
+            checkCurrent(client, startEpoch, connection.get()); // read here: no gap before the merge
+            Object id = row.get("source_id");
+            String key = id instanceof String ? (String) id : sourceId;
+            Map<String, Object> held = sources.get(key);
+            // A resolved entry is never replaced; an unresolved one takes the committed row, resolved or not
+            // (cloud -> failed must show). A missing entry takes it only if resolved, as the napari widget does.
+            if (held == null ? isResolved(row) : !isResolved(held)) {
+                Map<String, Map<String, Object>> all = new HashMap<>(sources);
+                all.put(key, committed);
+                sources = Collections.unmodifiableMap(all);
+            }
+        }
+        return committed;
     }
 
     // --- SQL -----------------------------------------------------------------

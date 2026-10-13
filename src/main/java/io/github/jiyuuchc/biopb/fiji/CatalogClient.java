@@ -6,6 +6,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 
 /**
  * The few calls {@link SourceList} makes of a tensor server, with plain Java
@@ -67,6 +69,31 @@ public interface CatalogClient {
         public String getSourceId() { return sourceId; }
     }
 
+    /** A server heartbeat while a source resolves. */
+    final class ResolveProgress {
+        private final double elapsedSeconds;
+        private final String targetName;
+        private final long targetBytes;
+
+        /**
+         * @param elapsedSeconds seconds since the server began resolving
+         * @param targetName the file being recalled, or empty if the server cannot name it
+         * @param targetBytes its size, or 0 if unknown
+         */
+        public ResolveProgress(double elapsedSeconds, String targetName, long targetBytes) {
+            this.elapsedSeconds = elapsedSeconds;
+            this.targetName = targetName == null ? "" : targetName;
+            this.targetBytes = targetBytes;
+        }
+
+        /** Seconds since the server began resolving. */
+        public double getElapsedSeconds() { return elapsedSeconds; }
+        /** The recall target's name, or empty. */
+        public String getTargetName() { return targetName; }
+        /** The recall target's size in bytes, or 0 if unknown. */
+        public long getTargetBytes() { return targetBytes; }
+    }
+
     /**
      * Reads one level of the catalog tree.
      *
@@ -87,4 +114,20 @@ public interface CatalogClient {
      * {@link SourceList#BASE_COLUMNS}.
      */
     String sourceRowColumns();
+
+    /**
+     * Resolves an unresolved source (for a cloud placeholder this downloads the whole file, so it
+     * can take minutes) and returns its terminal catalog row. Blocking: call off the UI thread.
+     *
+     * @param onProgress receives the server's heartbeats, or {@code null}
+     * @param shouldCancel polled at each heartbeat; true stops the call, or {@code null}
+     * @return the source's {@code sources} row, as {@link #query} rows are
+     * @throws ResolveCancelledException if {@code shouldCancel} stopped the call
+     * @throws UnsupportedOperationException if this client cannot resolve
+     * @throws IOException if the call fails
+     */
+    default Map<String, Object> resolveSource(String sourceId, Consumer<ResolveProgress> onProgress,
+            BooleanSupplier shouldCancel) throws IOException {
+        throw new UnsupportedOperationException("resolve is not supported by this client");
+    }
 }

@@ -32,6 +32,13 @@ public final class TreeModelBuilder {
     /** Shown under a folder whose read failed; opening it again retries. */
     public static final String FAILED_NOTE = "Could not load this folder";
 
+    /** Shown on a cloud placeholder: resolving it downloads the file. */
+    public static final String CLOUD_GLYPH = "\u2601";
+    /** Shown on a source the server is still indexing. */
+    public static final String PENDING_GLYPH = "\u22ef";
+    private static final String CLOUD_NOTE = "Cloud file, not downloaded. Resolving it downloads the whole file.";
+    private static final String PENDING_NOTE = "Being indexed in the background.";
+
     private static final Pattern SEPARATORS = Pattern.compile("[\\\\/]+");
     private static final Pattern DRIVE = Pattern.compile("[A-Za-z]:");
 
@@ -39,6 +46,26 @@ public final class TreeModelBuilder {
 
     /** What a tree row is. */
     public enum Kind { FOLDER, SOURCE, TENSOR, NOTE }
+
+    /**
+     * Why a source is unresolved, as the server's {@code unresolved_reason} says. {@code CLOUD}
+     * is a placeholder whose resolve downloads the file; it is also what a server that gives no
+     * reason (or one this client does not know) reads as, as in the napari widget.
+     */
+    public enum Unresolved { NONE, CLOUD, PENDING, FAILED }
+
+    /**
+     * The unresolved state of a source row. Only the server's {@code is_resolved} decides it, not
+     * an empty tensor list: a source that resolved and holds nothing is {@code NONE} (and gets no
+     * row, see {@link #sourceNode}); an unresolved one has no tensors because they are unknown.
+     */
+    public static Unresolved unresolvedState(Map<String, Object> descriptor) {
+        if (SourceList.isResolved(descriptor)) {
+            return Unresolved.NONE;
+        }
+        Object why = descriptor.get("unresolved_reason");
+        return "failed".equals(why) ? Unresolved.FAILED : "pending".equals(why) ? Unresolved.PENDING : Unresolved.CLOUD;
+    }
 
     /** The user object of a tree node. */
     public static final class Node {
@@ -48,8 +75,15 @@ public final class TreeModelBuilder {
         private final String suffix;
         private final String tooltip;
         private final List<String> arrayIds;
+        private final Unresolved unresolved;
 
         Node(Kind kind, String key, String text, String suffix, String tooltip, List<String> arrayIds) {
+            this(kind, key, text, suffix, tooltip, arrayIds, Unresolved.NONE);
+        }
+
+        Node(Kind kind, String key, String text, String suffix, String tooltip, List<String> arrayIds,
+                Unresolved unresolved) {
+            this.unresolved = unresolved;
             this.kind = kind;
             this.key = key;
             this.text = text;
@@ -70,6 +104,8 @@ public final class TreeModelBuilder {
         public String getTooltip() { return tooltip; }
         /** The tensors this row opens: one for a tensor or single-tensor source, all for a multi-tensor source. */
         public List<String> getArrayIds() { return arrayIds; }
+        /** For a source row, why it is unresolved ({@link Unresolved#NONE} if it is not); it can be resolved unless NONE. */
+        public Unresolved getUnresolved() { return unresolved; }
         /** Whether the row opens as one image (double-click). */
         public boolean isOpenable() { return arrayIds.size() == 1 && kind != Kind.FOLDER; }
         /** An identity that survives a rebuild, for selection. */
@@ -82,6 +118,11 @@ public final class TreeModelBuilder {
     private static DefaultMutableTreeNode node(Kind kind, String key, String text, String suffix, String tip,
             List<String> ids) {
         return new DefaultMutableTreeNode(new Node(kind, key, text, suffix, tip, ids));
+    }
+
+    private static DefaultMutableTreeNode node(Kind kind, String key, String text, String suffix, String tip,
+            List<String> ids, Unresolved unresolved) {
+        return new DefaultMutableTreeNode(new Node(kind, key, text, suffix, tip, ids, unresolved));
     }
 
     private static DefaultMutableTreeNode note(String text) {
@@ -163,37 +204,47 @@ public final class TreeModelBuilder {
     // --- sources -------------------------------------------------------------
 
     /**
-     * A source row, or {@code null} for a resolved source with nothing in it. One
+     * A source row, or {@code null} for a resolved source with nothing in it (an unresolved one keeps
+     * its row, so it can be resolved). One
      * tensor makes a leaf; several make a parent with a row per tensor.
      */
     public static DefaultMutableTreeNode sourceNode(Map<String, Object> descriptor, String name) {
         String id = String.valueOf(descriptor.get("source_id"));
         List<Map<?, ?>> tensors = tensors(descriptor);
-        boolean resolved = !Boolean.FALSE.equals(descriptor.get("is_resolved"));
+        Unresolved state = unresolvedState(descriptor);
+        if (tensors.isEmpty() && state == Unresolved.NONE) {
+            return null;
+        }
+        // The cloud / pending glyph leads the suffix; a failed source says so only when it has no shape to show.
+        String glyph = state == Unresolved.CLOUD ? CLOUD_GLYPH : state == Unresolved.PENDING ? PENDING_GLYPH : "";
+        String note = state == Unresolved.CLOUD ? CLOUD_NOTE : state == Unresolved.PENDING ? PENDING_NOTE : "";
+        String tip = note.isEmpty() ? id : id + " \u2013 " + note;
         if (tensors.isEmpty()) {
-            if (resolved) {
-                return null;
-            }
-            Object why = descriptor.get("unresolved_reason");
-            return node(Kind.SOURCE, id, name, "failed".equals(why) ? "[failed]" : "[unresolved]", id,
-                    Collections.<String>emptyList());
+            return node(Kind.SOURCE, id, name, state == Unresolved.FAILED ? "[failed]" : glyph, tip,
+                    Collections.<String>emptyList(), state);
         }
         if (tensors.size() == 1) {
             Map<?, ?> t = tensors.get(0);
             String array = String.valueOf(t.get("array_id"));
-            return node(Kind.SOURCE, id, name, tensorSuffix(t), id, Collections.singletonList(array));
+            return node(Kind.SOURCE, id, name, withGlyph(glyph, tensorSuffix(t)), tip, Collections.singletonList(array),
+                    state);
         }
         List<String> all = new ArrayList<>();
         for (Map<?, ?> t : tensors) {
             all.add(String.valueOf(t.get("array_id")));
         }
-        DefaultMutableTreeNode n = node(Kind.SOURCE, id, name, tensors.size() + " tensors", id, all);
+        DefaultMutableTreeNode n = node(Kind.SOURCE, id, name, withGlyph(glyph, tensors.size() + " tensors"), tip, all,
+                state);
         for (Map<?, ?> t : tensors) {
             String array = String.valueOf(t.get("array_id"));
             n.add(node(Kind.TENSOR, array, shortName(array), tensorSuffix(t), array,
                     Collections.singletonList(array)));
         }
         return n;
+    }
+
+    private static String withGlyph(String glyph, String suffix) {
+        return glyph.isEmpty() ? suffix : suffix.isEmpty() ? glyph : glyph + " " + suffix;
     }
 
     private static List<Map<?, ?>> tensors(Map<String, Object> descriptor) {

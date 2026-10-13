@@ -21,6 +21,8 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.Test;
@@ -40,6 +42,31 @@ public class SourceListTest {
         final java.util.concurrent.atomic.AtomicInteger healthCalls = new java.util.concurrent.atomic.AtomicInteger();
         Runnable queryHook; // runs inside a whole-listing query
         Runnable healthHook; // runs inside healthCheck, to interleave a call
+        final Set<String> unresolved = new HashSet<>(); // ids the catalog lists as not resolved
+        Resolver resolver; // answers resolveSource; null: this server cannot resolve
+
+        interface Resolver {
+            Map<String, Object> resolve(String id, Consumer<ResolveProgress> progress, BooleanSupplier cancel)
+                    throws IOException;
+        }
+
+        @Override
+        public Map<String, Object> resolveSource(String id, Consumer<ResolveProgress> progress,
+                BooleanSupplier cancel) throws IOException {
+            if (resolver == null) {
+                throw new UnsupportedOperationException("no resolve");
+            }
+            return resolver.resolve(id, progress, cancel);
+        }
+
+        private List<Map<String, Object>> marked(List<Map<String, Object>> rows) {
+            for (Map<String, Object> row : rows) {
+                if (unresolved.contains(row.get("source_id"))) {
+                    row.put("is_resolved", false);
+                }
+            }
+            return rows;
+        }
 
         @Override
         public Level catalogChildren(String key, int limit) {
@@ -65,9 +92,9 @@ public class SourceListTest {
                 while (m.find()) {
                     ids.add(m.group(1).replace("''", "'"));
                 }
-                return rows(ids);
+                return marked(rows(ids));
             }
-            return rows(catalog);
+            return marked(rows(catalog));
         }
 
         @Override
@@ -421,6 +448,221 @@ public class SourceListTest {
             // stale client
         }
         assertFalse(list.getLevels().containsKey("a"));
+    }
+
+    // --- resolve -------------------------------------------------------------
+
+    static Map<String, Object> resolvedRow(String id, boolean resolved, String arrayId) {
+        Map<String, Object> row = rows(l(id)).get(0);
+        row.put("is_resolved", resolved);
+        row.put("tensors", arrayId == null ? new ArrayList<>()
+                : Arrays.asList(TreeModelBuilderTest.tensor(arrayId, "uint8", 4, 4)));
+        return row;
+    }
+
+    @Test
+    public void resolveMergesTheCommittedRowWhenTheRelistStillShowsItUnresolved() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a", "b");
+        assertFalse(SourceList.isResolved(list.getSources().get("a")));
+        List<String> seen = new ArrayList<>();
+        client.resolver = (id, progress, cancel) -> {
+            progress.accept(new CatalogClient.ResolveProgress(2, "a.svs", 10));
+            return resolvedRow(id, true, "a/0");
+        };
+        Map<String, Object> row = list.resolve("a", p -> seen.add(p.getTargetName()), () -> false);
+
+        assertEquals(Arrays.asList("a.svs"), seen);
+        assertEquals(1, client.listings()); // it re-listed ...
+        assertSame(row, list.getSources().get("a")); // ... and the row still landed
+        assertTrue(SourceList.isResolved(list.getSources().get("a")));
+        assertTrue(SourceList.isResolved(list.getSources().get("b")));
+    }
+
+    @Test
+    public void resolveMergesIntoALazyListing() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = lazyListing(client, levels("", level(l(), l("a"))));
+        list.refresh();
+        client.resolver = (id, progress, cancel) -> resolvedRow(id, true, "a/0");
+        list.resolve("a", null, null);
+        assertTrue(SourceList.isResolved(list.getSources().get("a")));
+        assertTrue(list.isLazy());
+    }
+
+    @Test
+    public void resolveKeepsAnEntryThatIsAlreadyResolved() throws Exception {
+        FakeClient client = new FakeClient();
+        SourceList list = listing(client, "a");
+        Map<String, Object> held = list.getSources().get("a");
+        client.resolver = (id, progress, cancel) -> resolvedRow(id, true, "a/0");
+        list.resolve("a", null, null);
+        assertEquals(held, list.getSources().get("a")); // the re-list's entry, not the row
+    }
+
+    @Test
+    public void resolveNeverMarksASourceResolvedFromAnUnresolvedRow() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a");
+        client.resolver = (id, progress, cancel) -> {
+            Map<String, Object> row = resolvedRow(id, false, null);
+            row.put("unresolved_reason", "failed");
+            return row;
+        };
+        Map<String, Object> row = list.resolve("a", null, null);
+        assertEquals("failed", row.get("unresolved_reason"));
+        assertFalse(SourceList.isResolved(list.getSources().get("a")));
+        assertEquals("failed", list.getSources().get("a").get("unresolved_reason")); // the held one was unresolved too
+    }
+
+    @Test
+    public void aResolveSurvivesAFailingRelist() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a");
+        client.resolver = (id, progress, cancel) -> {
+            client.queryHook = () -> {
+                throw new IllegalArgumentException("down");
+            };
+            return resolvedRow(id, true, "a/0");
+        };
+        list.resolve("a", null, null);
+        assertTrue(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test
+    public void anUnresolvedEntryTakesACommittedRowWithANewReasonButAResolvedOneIsKept() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        client.unresolved.add("b");
+        SourceList list = listing(client, "a", "b");
+        client.resolver = (id, progress, cancel) -> {
+            Map<String, Object> row = resolvedRow(id, false, null);
+            row.put("unresolved_reason", "failed");
+            return row;
+        };
+        list.resolve("a", null, null);
+        assertEquals("failed", list.getSources().get("a").get("unresolved_reason")); // cloud -> failed shows
+        // a resolved entry is never replaced by an unresolved row
+        client.unresolved.clear();
+        list.refresh();
+        assertTrue(SourceList.isResolved(list.getSources().get("b")));
+        list.resolve("b", null, null);
+        assertTrue(SourceList.isResolved(list.getSources().get("b")));
+    }
+
+    @Test
+    public void aCommittedRowDrawsTheLazyFolderAfterCollapseAndReexpand() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        Map<String, CatalogClient.Level> served = levels("", level(l(), l("a")));
+        SourceList list = lazyListing(client, served);
+        list.refresh();
+        client.resolver = (id, progress, cancel) -> {
+            Map<String, Object> row = resolvedRow(id, false, null);
+            row.put("unresolved_reason", "failed");
+            return row;
+        };
+        list.resolve("a", null, null);
+        // levels reference sources by id: every rebuild draws the committed row
+        for (int i = 0; i < 2; i++) {
+            javax.swing.tree.DefaultMutableTreeNode n = TreeModelBuilder.levelChildren("", list.getLevels(),
+                    list.getSources(), new HashSet<String>(), new HashSet<String>()).get(0);
+            assertEquals("[failed]", TreeModelBuilder.nodeOf(n).getSuffix());
+        }
+        // a poll re-list is the server's view again, as in the napari widget
+        client.unresolved.clear();
+        list.refresh();
+        assertTrue(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test
+    public void aCancelledResolveMergesAndRelistsNothing() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a");
+        boolean[] cancel = {false};
+        client.resolver = (id, progress, shouldCancel) -> {
+            cancel[0] = true;
+            if (shouldCancel.getAsBoolean()) {
+                throw new ResolveCancelledException(id);
+            }
+            return resolvedRow(id, true, "a/0");
+        };
+        try {
+            list.resolve("a", null, () -> cancel[0]);
+            fail("should have been cancelled");
+        } catch (ResolveCancelledException expected) {
+            assertTrue(expected.getMessage().contains("'a'"));
+        }
+        assertEquals(0, client.listings());
+        assertFalse(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test
+    public void aFailedResolveThrowsAndChangesNothing() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a");
+        client.resolver = (id, progress, cancel) -> {
+            throw new IOException("disk full");
+        };
+        try {
+            list.resolve("a", null, null);
+            fail("should have failed");
+        } catch (IOException e) {
+            assertEquals("disk full", e.getMessage());
+        }
+        assertEquals(0, client.listings());
+        assertFalse(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test
+    public void aResolveAcrossAClearIsDropped() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        SourceList list = listing(client, "a");
+        client.resolver = (id, progress, cancel) -> {
+            list.clear(); // the connection was replaced while the download ran
+            return resolvedRow(id, true, "a/0");
+        };
+        try {
+            list.resolve("a", null, null);
+            fail("should have been dropped");
+        } catch (IllegalStateException expected) {
+            // stale epoch
+        }
+        assertTrue(list.getSources().isEmpty());
+    }
+
+    @Test
+    public void aResolveOnAReplacedClientIsDropped() throws Exception {
+        FakeClient first = new FakeClient();
+        FakeClient second = new FakeClient();
+        CatalogClient[] current = {first};
+        first.catalog = l("a");
+        first.unresolved.add("a");
+        SourceList list = new SourceList(() -> current[0]);
+        list.refresh();
+        first.resolver = (id, progress, cancel) -> {
+            current[0] = second;
+            return resolvedRow(id, true, "a/0");
+        };
+        try {
+            list.resolve("a", null, null);
+            fail("should have been dropped");
+        } catch (IllegalStateException expected) {
+            // stale client
+        }
+        assertFalse(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test(expected = UnsupportedOperationException.class)
+    public void aClientThatCannotResolveSaysSo() throws Exception {
+        new SourceList(new FakeClient()).resolve("a", null, null);
     }
 
     // --- the watcher ---------------------------------------------------------

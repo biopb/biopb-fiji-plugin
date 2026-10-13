@@ -8,6 +8,9 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import biopb.tensor.TensorOperationCancelledException;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.vector.FieldVector;
@@ -74,15 +77,38 @@ public final class FlightCatalogClient implements CatalogClient {
     @Override
     public List<Map<String, Object>> query(String sql) throws IOException {
         try (VectorSchemaRoot root = client.query(sql)) {
-            List<Map<String, Object>> rows = new ArrayList<>(root.getRowCount());
-            for (int i = 0; i < root.getRowCount(); i++) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                for (FieldVector v : root.getFieldVectors()) {
-                    row.put(v.getName(), plain(v.getObject(i)));
-                }
-                rows.add(row);
+            return rows(root);
+        }
+    }
+
+    private static List<Map<String, Object>> rows(VectorSchemaRoot root) {
+        List<Map<String, Object>> rows = new ArrayList<>(root.getRowCount());
+        for (int i = 0; i < root.getRowCount(); i++) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (FieldVector v : root.getFieldVectors()) {
+                row.put(v.getName(), plain(v.getObject(i)));
             }
-            return rows;
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    @Override
+    public Map<String, Object> resolveSource(String sourceId, Consumer<ResolveProgress> onProgress,
+            BooleanSupplier shouldCancel) throws IOException {
+        // The SDK hands back a root the caller must close; copy the row out and close it.
+        try (VectorSchemaRoot root = client.resolveSource(sourceId,
+                onProgress == null ? null
+                        : p -> onProgress.accept(new ResolveProgress(p.getElapsedSeconds(), p.getTargetName(),
+                                p.getTargetBytes())),
+                shouldCancel)) {
+            List<Map<String, Object>> rows = root == null ? Collections.<Map<String, Object>>emptyList() : rows(root);
+            if (rows.isEmpty()) {
+                throw new IOException("resolve of '" + sourceId + "' returned no catalog row");
+            }
+            return rows.get(0);
+        } catch (TensorOperationCancelledException e) {
+            throw new ResolveCancelledException(sourceId, e);
         }
     }
 

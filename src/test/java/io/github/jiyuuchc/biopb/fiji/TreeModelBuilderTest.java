@@ -196,4 +196,80 @@ public class TreeModelBuilderTest {
         assertEquals(9, TensorBrowserPanel.parseAddress("grpc://[::1]:9/x/y")[1]);
         assertEquals("h", TensorBrowserPanel.parseAddress("grpc://h:5/path")[0]);
     }
+
+    private static Map<String, Object> unresolved(Object reason, Map<String, Object>... tensors) {
+        Map<String, Object> d = source("u", "/x/cloud.svs", tensors);
+        d.put("is_resolved", false);
+        if (reason != null) {
+            d.put("unresolved_reason", reason);
+        }
+        return d;
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void unresolvedStateFollowsTheServersFlagAndReason() {
+        assertEquals(TreeModelBuilder.Unresolved.NONE, TreeModelBuilder.unresolvedState(source("s", "u")));
+        assertEquals(TreeModelBuilder.Unresolved.CLOUD, TreeModelBuilder.unresolvedState(unresolved("needs_recall")));
+        assertEquals(TreeModelBuilder.Unresolved.CLOUD, TreeModelBuilder.unresolvedState(unresolved(null))); // an older server
+        assertEquals(TreeModelBuilder.Unresolved.CLOUD, TreeModelBuilder.unresolvedState(unresolved("something-new")));
+        assertEquals(TreeModelBuilder.Unresolved.PENDING, TreeModelBuilder.unresolvedState(unresolved("pending")));
+        assertEquals(TreeModelBuilder.Unresolved.FAILED, TreeModelBuilder.unresolvedState(unresolved("failed")));
+        Map<String, Object> noColumn = source("s", "u");
+        noColumn.remove("is_resolved"); // no column reads as resolved
+        assertEquals(TreeModelBuilder.Unresolved.NONE, TreeModelBuilder.unresolvedState(noColumn));
+        noColumn.put("unresolved_reason", "failed"); // the reason of a resolved source is not read
+        assertEquals(TreeModelBuilder.Unresolved.NONE, TreeModelBuilder.unresolvedState(noColumn));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void unresolvedRowsKeepTheirRowWithABadgePerReason() {
+        Node cloud = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(unresolved("needs_recall"), "c"));
+        assertEquals(TreeModelBuilder.CLOUD_GLYPH, cloud.getSuffix());
+        assertTrue(cloud.getTooltip().contains("downloads"));
+        assertTrue(cloud.getArrayIds().isEmpty());
+        assertEquals(TreeModelBuilder.CLOUD_GLYPH,
+                TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(unresolved(null), "c")).getSuffix());
+        Node pending = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(unresolved("pending"), "p"));
+        assertEquals(TreeModelBuilder.PENDING_GLYPH, pending.getSuffix());
+        assertTrue(pending.getTooltip().contains("indexed"));
+        Node failed = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(unresolved("failed"), "f"));
+        assertEquals("[failed]", failed.getSuffix());
+        assertEquals("u", failed.getTooltip());
+        assertEquals(TreeModelBuilder.Unresolved.FAILED, failed.getUnresolved());
+        assertTrue(!cloud.isOpenable());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void resolvedSourcesAreNotMarkedAndAnEmptyOneHasNoRow() {
+        Node ok = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(source("s", "u", tensor("s/0", "uint8", 2, 2)), "s"));
+        assertEquals(TreeModelBuilder.Unresolved.NONE, ok.getUnresolved());
+        assertEquals("2\u00d72 uint8", ok.getSuffix());
+        assertNull(TreeModelBuilder.sourceNode(source("s", "u"), "s")); // resolved, nothing readable
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void aGlyphLeadsAnUnresolvedSourceThatStillListsTensors() {
+        Node n = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(
+                unresolved("needs_recall", tensor("u/0", "uint8", 2, 2)), "c"));
+        assertEquals(TreeModelBuilder.CLOUD_GLYPH + " 2\u00d72 uint8", n.getSuffix());
+        assertEquals(TreeModelBuilder.Unresolved.CLOUD, n.getUnresolved());
+        Node failed = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(
+                unresolved("failed", tensor("u/0", "uint8", 2, 2)), "f"));
+        assertEquals("2\u00d72 uint8", failed.getSuffix()); // [failed] only when there is nothing else to show
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void unresolvedSourcesGetRowsInALevel() {
+        Map<String, CatalogClient.Level> levels = new LinkedHashMap<>();
+        levels.put("", level(false, Collections.<CatalogClient.Folder>emptyList(),
+                new CatalogClient.Source("a", "u"), new CatalogClient.Source("e", "e")));
+        DefaultMutableTreeNode root = TreeModelBuilder.buildLevels(levels,
+                sources(unresolved("pending"), source("e", "x")), new HashSet<String>(), new HashSet<String>());
+        assertEquals(1, root.getChildCount()); // the empty resolved one is left out
+    }
 }

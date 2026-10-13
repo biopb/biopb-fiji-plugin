@@ -17,4 +17,15 @@ public interface TensorBrowserListener {
 
     /** The user asked to load a tensor's ROI annotations as layers. */
     void roisRequested(String arrayId);
+
+    /**
+     * Progress of the panel's own resolve work, to show in a status line.
+     *
+     * @param text what is happening or happened (an outcome when {@code busy} is false)
+     * @param busy whether a resolve is still running
+     */
+    default void resolveStatus(String text, boolean busy) { }
+
+    /** A resolve failed: the host should tell the user (modally, as the napari widget does). */
+    default void resolveFailed(String title, String message) { }
 }
