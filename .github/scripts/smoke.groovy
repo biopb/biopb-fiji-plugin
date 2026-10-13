@@ -1,6 +1,8 @@
 // Headless smoke test run inside Fiji: ./Fiji.app/fiji-linux-x64 --headless --run smoke.groovy
 // Exits non-zero on any failure.
 #@ CommandService cs
+import org.apache.arrow.flight.*
+import org.apache.arrow.memory.RootAllocator
 try {
     // 1. the command is discovered with its menu path
     def info = cs.getCommand("io.github.jiyuuchc.biopb.fiji.TensorBrowserCommand")
@@ -50,12 +52,48 @@ try {
     }
     println("OK Arrow allocation")
 
-    // 4. TLS: the SDK connection loads against Fiji's own netty (jars.sh checks the install left it alone);
-    //    gRPC falls back to the JDK TLS provider when netty's OpenSSL (tcnative) is unavailable.
-    Class.forName("biopb.tensor.Connection")
-    Class.forName("biopb.tensor.TlsTrusts")
-    def netty = io.netty.util.Version.identify().get("netty-common").artifactVersion()
-    println("OK TLS classes load (Fiji netty " + netty + ", OpenSSL " + io.netty.handler.ssl.OpenSsl.isAvailable() + ")")
+    // 4. Real gRPC/netty path on Fiji's own netty (jars.sh checks the install left it alone): an
+    //    in-process Flight server on loopback, once over TLS (self-signed cert from openssl) and once in
+    //    plaintext through the SDK client. Any NoClassDefFoundError / NoSuchMethodError fails the test.
+    def dir = java.nio.file.Files.createTempDirectory("biopb-smoke").toFile()
+    def cert = new File(dir, "cert.pem"), key = new File(dir, "key.pem")
+    def gen = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
+               "-addext", "subjectAltName=DNS:localhost", "-keyout", key.path, "-out", cert.path].execute()
+    gen.waitForProcessOutput(new StringBuffer(), new StringBuffer())
+    if (gen.exitValue() != 0 || !cert.exists()) throw new RuntimeException("openssl could not make a certificate")
+    def producer = new NoOpFlightProducer() {
+        void listActions(FlightProducer.CallContext c, FlightProducer.StreamListener<ActionType> l) {
+            l.onNext(new ActionType("health", "health")); l.onCompleted()
+        }
+        void doAction(FlightProducer.CallContext c, Action a, FlightProducer.StreamListener<Result> l) {
+            l.onNext(new Result('{"status": "SERVING"}'.getBytes("UTF-8"))); l.onCompleted()
+        }
+    }
+    def alloc2 = new RootAllocator(Long.MAX_VALUE)
+    def serve = { Location loc, boolean tls ->
+        def b = FlightServer.builder(alloc2, loc, producer)
+        if (tls) b.useTls(cert, key)
+        return b.build().start()
+    }
+    def tlsServer = serve(Location.forGrpcTls("localhost", 0), true)
+    def plainServer = serve(Location.forGrpcInsecure("localhost", 0), false)
+    try {
+        def tlsClient = FlightClient.builder(alloc2, Location.forGrpcTls("localhost", tlsServer.port))
+                .trustedCertificates(new FileInputStream(cert)).build()
+        try {
+            def names = tlsClient.listActions().collect { it.type }
+            if (names != ["health"]) throw new RuntimeException("TLS listActions answered " + names)
+        } finally { tlsClient.close() }
+        println("OK TLS Flight round trip (netty " + io.netty.util.Version.identify().get("netty-common").artifactVersion() + ")")
+        def sdk = new biopb.tensor.TensorFlightClient(Location.forGrpcInsecure("localhost", plainServer.port))
+        try {
+            def h = sdk.healthCheck()
+            if (h.status != "SERVING") throw new RuntimeException("plaintext health answered " + h)
+        } finally { sdk.close() }
+        println("OK plaintext SDK round trip")
+    } finally {
+        tlsServer.close(); plainServer.close(); alloc2.close(); dir.deleteDir()
+    }
 } catch (Throwable t) {
     t.printStackTrace()
     System.err.println("SMOKE FAILED: " + t)

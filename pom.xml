@@ -102,17 +102,16 @@
         <exclusion><groupId>io.netty</groupId><artifactId>netty-resolver</artifactId></exclusion>
         <exclusion><groupId>io.netty</groupId><artifactId>netty-transport</artifactId></exclusion>
         <exclusion><groupId>io.netty</groupId><artifactId>netty-tcnative-classes</artifactId></exclusion>
-        <exclusion><groupId>io.grpc</groupId><artifactId>grpc-context</artifactId></exclusion>
-        <exclusion><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId></exclusion>
       </exclusions>
     </dependency>
 
     <!--
-      Fiji shares these netty jars (4.1.73) and tcnative-classes (2.0.46) with other plugins. The
-      SDK pulls newer ones, and "mvn install -Dscijava.app.directory" would replace Fiji's, so they
-      are provided here: not copied into Fiji. TLS works on Fiji's versions (the jars Fiji lacks:
-      netty-tcnative-boringssl-static, netty-codec-socks, handler-proxy, grpc-netty, arrow, ... are
-      still installed).
+      Fiji ships these netty jars (4.1.73; codec-http/http2/native-unix-common 4.1.135) and
+      tcnative-classes (2.0.46) for other plugins. The SDK pulls newer ones, and
+      "mvn install -Dscijava.app.directory" would replace Fiji's, so they are provided here: not copied
+      into Fiji. TLS works on Fiji's versions. Everything Fiji lacks (grpc-netty, grpc-context, arrow,
+      flight, netty-codec-socks, handler-proxy, tcnative-boringssl-static, ...) is installed.
+      .github/scripts/jars.sh fails CI if Fiji stops shipping these exact versions.
     -->
     <dependency>
       <groupId>io.netty</groupId>
@@ -154,12 +153,6 @@
       <groupId>io.netty</groupId>
       <artifactId>netty-tcnative-classes</artifactId>
       <version>2.0.46.Final</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.grpc</groupId>
-      <artifactId>grpc-netty</artifactId>
-      <version>1.70.0</version>
       <scope>provided</scope>
     </dependency>
     <dependency>

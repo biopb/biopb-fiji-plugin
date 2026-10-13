@@ -53,13 +53,38 @@ public class ServerConnectorTest {
         assertEquals("grpc+tcp://h:5", TensorBrowserPanel.toUrl("grpc+tcp://h:5"));
         assertEquals("grpc+tls://h:2", TensorBrowserPanel.toUrl("GRPC+TLS://h:2/x"));
         assertEquals("grpcs://h:3", TensorBrowserPanel.toUrl("grpcs://h:3"));
-        for (String bad : new String[] {"http://h:1", "ftp://h", "grpc+tls://h:x"}) {
+        assertEquals("grpc+tls://[::1]:8815", TensorBrowserPanel.toUrl("grpc+tls://[::1]:8815"));
+        assertEquals("grpc://[::1]:8815", TensorBrowserPanel.toUrl("::1"));
+        assertEquals("grpc+tls://h:1", TensorBrowserPanel.toUrl("GRPC+TLS://h:1"));
+        assertEquals("grpc://h:1", TensorBrowserPanel.toUrl("h:1/a/b?x=1#f"));
+        assertEquals("grpc://h:1", TensorBrowserPanel.toUrl("h:1?x=1"));
+        for (String bad : new String[] {"http://h:1", "ftp://h", "grpc+tls://h:x", "user@h:1", "grpc://u:p@h:1", "HTTP://h:1"}) {
             try {
                 TensorBrowserPanel.toUrl(bad);
                 fail(bad);
             } catch (IllegalArgumentException expected) {
                 assertFalse(expected.getMessage().contains(SECRET));
             }
+        }
+    }
+
+    @Test
+    public void unsupportedSchemeIsReportedBeforeAnythingElse() {
+        try {
+            TensorBrowserPanel.toUrl("http://user@h:x");
+            fail();
+        } catch (IllegalArgumentException e) {
+            assertTrue(e.getMessage(), e.getMessage().startsWith("Unsupported scheme"));
+        }
+    }
+
+    @Test
+    public void loopbackHosts() {
+        for (String u : new String[] {"grpc://localhost:1", "grpc://LOCALHOST:1", "grpc://127.0.0.1:1", "grpc://127.1.2.3:1", "grpc://[::1]:1"}) {
+            assertTrue(u, TensorBrowserPanel.isLoopback(u));
+        }
+        for (String u : new String[] {"grpc://example.org:1", "grpc://10.0.0.1:1", "grpc://127.example.org:1x", "grpc://[::2]:1"}) {
+            assertFalse(u, TensorBrowserPanel.isLoopback(u));
         }
     }
 
@@ -146,14 +171,14 @@ public class ServerConnectorTest {
         TensorBrowserPanel p = new TensorBrowserPanel((u, t) -> {
             asked.add(u + "|" + t);
             throw new IOException(message);
-        }, "h:1", SECRET);
+        }, "grpc+tls://h:1", SECRET);
         try {
             SwingUtilities.invokeAndWait(() -> {
                 p.setErrorDialog(dialogs::add);
                 p.connect();
             });
             await(() -> !dialogs.isEmpty());
-            assertEquals("grpc://h:1|" + SECRET, asked.get(0)); // the token goes to the connector ...
+            assertEquals("grpc+tls://h:1|" + SECRET, asked.get(0)); // the token goes to the connector ...
             assertEquals(message, dialogs.get(0));
             String status = p.getStatusLabel().getText();
             assertTrue(status, status.contains(message));
@@ -193,5 +218,70 @@ public class ServerConnectorTest {
         } finally {
             SwingUtilities.invokeAndWait(p::dispose);
         }
+    }
+
+    @Test
+    public void tokenIsNotSentInPlaintextToARemoteHost() throws Exception {
+        Assume.assumeFalse(GraphicsEnvironment.isHeadless());
+        List<String> asked = new CopyOnWriteArrayList<>();
+        List<String> dialogs = new CopyOnWriteArrayList<>();
+        TensorBrowserPanel p = new TensorBrowserPanel((u, t) -> {
+            asked.add(u + "|" + t);
+            throw new IOException("down");
+        }, "example.org:1", SECRET);
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                p.setErrorDialog(dialogs::add);
+                p.connect();
+            });
+            await(() -> !dialogs.isEmpty());
+            assertTrue(asked.isEmpty());
+            assertTrue(dialogs.get(0), dialogs.get(0).contains("grpc+tls://example.org:1"));
+            assertFalse(dialogs.get(0).contains(SECRET));
+            assertFalse(p.getStatusLabel().getText().contains(SECRET));
+            // loopback plaintext, and TLS to anywhere, are fine
+            SwingUtilities.invokeAndWait(() -> {
+                p.getAddressField().setText("127.0.0.1:1");
+                p.connect();
+            });
+            await(() -> asked.size() == 1 && p.getConnectButton().isEnabled());
+            assertEquals("grpc://127.0.0.1:1|" + SECRET, asked.get(0));
+            SwingUtilities.invokeAndWait(() -> {
+                p.getAddressField().setText("grpc+tls://example.org:1");
+                p.connect();
+            });
+            await(() -> asked.size() == 2 && p.getConnectButton().isEnabled());
+        } finally {
+            SwingUtilities.invokeAndWait(p::dispose);
+        }
+    }
+
+    @Test
+    public void tokenFieldIsOffForDiscoveryAndNoDialogAfterDispose() throws Exception {
+        Assume.assumeFalse(GraphicsEnvironment.isHeadless());
+        List<String> dialogs = new CopyOnWriteArrayList<>();
+        java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+        TensorBrowserPanel p = new TensorBrowserPanel((u, t) -> {
+            try {
+                gate.await(10, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                throw new IOException(e);
+            }
+            throw new IOException("late failure");
+        }, "grpc+tls://h:1", SECRET);
+        SwingUtilities.invokeAndWait(() -> {
+            assertTrue(p.getTokenField().isEnabled());
+            p.getAddressField().setText("");
+            assertFalse(p.getTokenField().isEnabled());
+            p.getAddressField().setText("grpc+tls://h:1");
+            assertTrue(p.getTokenField().isEnabled());
+            p.setErrorDialog(dialogs::add);
+            p.connect();
+            p.dispose(); // the panel is gone before the connect fails
+        });
+        gate.countDown();
+        Thread.sleep(500);
+        SwingUtilities.invokeAndWait(() -> { });
+        assertTrue(dialogs.isEmpty());
     }
 }

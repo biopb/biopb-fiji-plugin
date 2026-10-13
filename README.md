@@ -33,13 +33,15 @@ the server when you look at them.
    already opened from it: the server connection stays open until the last of those
    images is closed, and then closes.
 2. Enter the server and press **Connect**: `host[:port]` (plaintext; default
-   `localhost:8815`, or the `BIOPB_TENSOR_URL` environment variable), `grpc://host:port`, or
+   `localhost:8815`, or the `BIOPB_TENSOR_URL` environment variable), `grpc://host:port` (`grpc+tcp://` too), or
    `grpc+tls://host:port` (`grpcs://` also works) for TLS. Leave the address **empty** to
    discover the server the way the Python clients do (`BIOPB_TENSOR_URL`, then the local
    biopb control plane). The status line says whether the connection is plaintext or TLS;
    a failure is shown there and in a dialog, with what to do about it (token rejected, certificate
    changed, ...). The **Token** field (default `BIOPB_TENSOR_TOKEN`) is sent only to the address typed in
-   the field; it is never logged or shown, and is ignored when the address is empty.
+   the field; it is never logged or shown. It is refused over plaintext to a non-local host (use `grpc+tls://`;
+   plaintext to `localhost`/`127.*`/`::1` is allowed). With an empty address the field is disabled:
+   discovery finds the token itself (`BIOPB_TENSOR_TOKEN`, or the control plane's credential file).
 3. Browse the catalog (folders load as you expand them), or type in the search box
    (searched on the server).
 4. **Double-click** a tensor to open it at full resolution. Right-click it for
@@ -73,8 +75,9 @@ Connections go through the biopb SDK's `Connection`, so trust works as in the Py
 1. `BIOPB_TENSOR_TLS_CA`: a PEM file (a private CA, or the server's own certificate); checked on every connect.
 2. `BIOPB_TENSOR_TLS_FINGERPRINT`: the certificate's SHA-256, as `biopb-tensor-server cert init` prints it; checked on every connect.
 3. Otherwise **trust on first use**: the first time you connect to a `host:port` its certificate is pinned,
-   and a different certificate later is refused (never silently re-pinned). A server on this machine is
-   verified against the certificate it serves instead.
+   and a different certificate later is refused (never silently re-pinned). A server on this machine
+   (loopback) is verified against the certificate it serves and is **never pinned**, so it has no entry in the
+   pin file.
 
 Set these in the environment Fiji is started from. Pins live in `~/.local/state/biopb/tls-known-hosts.json`
 (`$BIOPB_STATE_HOME/biopb/` if `BIOPB_STATE_HOME` is set; same path on every platform): a JSON object mapping

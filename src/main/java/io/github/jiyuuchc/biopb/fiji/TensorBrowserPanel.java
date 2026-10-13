@@ -122,13 +122,28 @@ public class TensorBrowserPanel extends JPanel {
      * {@code grpcs://} keep their scheme. The path is dropped; the default port is filled in.
      */
     static String toUrl(String address) {
-        Object[] hp = parseAddress(address);
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^([A-Za-z][A-Za-z0-9+.-]*)://").matcher(address.trim());
-        String scheme = m.find() ? m.group(1).toLowerCase(java.util.Locale.ROOT) : "grpc";
-        if (!scheme.matches("grpc|grpc\\+tcp|grpc\\+tls|grpcs")) {
-            throw new IllegalArgumentException("Unsupported scheme '" + scheme + "://' (use grpc://, grpc+tls:// or host:port)");
+        String a = address.trim();
+        java.util.regex.Matcher m = SCHEME.matcher(a);
+        String scheme = "grpc";
+        if (m.find()) { // the scheme is read and checked once, before the host and port are parsed
+            scheme = m.group(1).toLowerCase(java.util.Locale.ROOT);
+            if (!scheme.matches("grpc|grpc\\+tcp|grpc\\+tls|grpcs")) {
+                throw new IllegalArgumentException("Unsupported scheme '" + scheme + "://' (use grpc://, grpc+tls:// or host:port)");
+            }
+            a = a.substring(m.end());
         }
-        return scheme + "://" + hp[0] + ":" + hp[1];
+        Object[] hp = parseAddress(a);
+        String host = (String) hp[0];
+        return scheme + "://" + (host.indexOf(':') >= 0 && !host.startsWith("[") ? "[" + host + "]" : host) + ":" + hp[1];
+    }
+
+    private static final java.util.regex.Pattern SCHEME = java.util.regex.Pattern.compile("^([A-Za-z][A-Za-z0-9+.-]*)://");
+
+    /** Whether {@code url}'s host is this machine ({@code localhost}, {@code 127.*}, {@code ::1}); no DNS lookup. */
+    static boolean isLoopback(String url) {
+        String host = url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceFirst("(?::\\d+)?(?:/.*)?$", "");
+        host = host.replaceAll("^\\[|\\]$", "");
+        return host.equalsIgnoreCase("localhost") || host.matches("127(\\.\\d{1,3}){3}") || host.equals("::1");
     }
 
     /** Whether {@code url} (as {@link #toUrl} returns it, or the SDK reports it) is a TLS address. */
@@ -154,8 +169,15 @@ public class TensorBrowserPanel extends JPanel {
      */
     static Object[] parseAddress(String address) {
         String a = address.trim().replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "");
-        int slash = a.indexOf('/');
-        a = slash < 0 ? a : a.substring(0, slash);
+        int end = a.length();
+        for (char c : new char[] {'/', '?', '#'}) { // a path, query or fragment is dropped
+            int i = a.indexOf(c);
+            end = i >= 0 ? Math.min(end, i) : end;
+        }
+        a = a.substring(0, end);
+        if (a.indexOf('@') >= 0) {
+            throw new IllegalArgumentException("Bad address '" + address + "': no user name or password in the address");
+        }
         if (a.isEmpty()) {
             throw new IllegalArgumentException("Enter host:port");
         }
@@ -214,6 +236,13 @@ public class TensorBrowserPanel extends JPanel {
     private SourceList list;
     private int connectGen;
     private java.util.function.Consumer<String> errorDialog = this::showConnectError;
+    private final Runnable syncToken = () -> {
+        boolean discover = address.getText().trim().isEmpty();
+        token.setEnabled(connectButton.isEnabled() && !discover);
+        token.setToolTipText(discover
+                ? "Not used when the address is empty: discovery finds the token itself (BIOPB_TENSOR_TOKEN or the control plane)"
+                : "Bearer token, sent only to the address typed here (refused over plaintext to a non-local host)");
+    };
     private int searchGen;
     private final Set<String> expanded = new HashSet<>(); // folders open in the folder view
     private Set<String> searchOpen = new HashSet<>(); // folders open in the search view
@@ -263,7 +292,7 @@ public class TensorBrowserPanel extends JPanel {
         address.setText(initialAddress);
         address.setToolTipText("host:port, grpc://host:port or grpc+tls://host:port; empty: discover the local server");
         token.setText(initialToken);
-        token.setToolTipText("Bearer token, used only for the address typed here");
+        syncToken.run();
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
         tree.setToggleClickCount(0); // double-click opens; the handles expand
@@ -300,6 +329,11 @@ public class TensorBrowserPanel extends JPanel {
         connectButton.addActionListener(e -> connect());
         cancelResolve.addActionListener(e -> cancelResolve());
         address.addActionListener(e -> connect());
+        address.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { syncToken.run(); }
+            @Override public void removeUpdate(DocumentEvent e) { syncToken.run(); }
+            @Override public void changedUpdate(DocumentEvent e) { syncToken.run(); }
+        });
         tree.addTreeExpansionListener(new TreeExpansionListener() {
             @Override public void treeExpanded(TreeExpansionEvent e) { onExpanded(e.getPath()); }
             @Override public void treeCollapsed(TreeExpansionEvent e) { onCollapsed(e.getPath()); }
@@ -359,8 +393,21 @@ public class TensorBrowserPanel extends JPanel {
             status.setText(e.getMessage());
             return;
         }
-        String secret = new String(token.getPassword()).trim();
-        String tokenArg = discover || secret.isEmpty() ? null : secret;
+        char[] typed = token.getPassword();
+        String secret = typed.length == 0 || discover ? null : new String(typed).trim();
+        java.util.Arrays.fill(typed, '\0');
+        String tokenArg = secret == null || secret.isEmpty() ? null : secret;
+        if (tokenArg != null && !isTls(url) && !isLoopback(url)) {
+            String msg = "Not sending the token to " + describe(url) + ": it would cross the network unencrypted. "
+                    + "Use grpc+tls://" + url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "") + " (or clear the Token field).";
+            status.setText(msg);
+            SwingUtilities.invokeLater(() -> {
+                if (!disposed) {
+                    errorDialog.accept(msg);
+                }
+            });
+            return;
+        }
         String target = discover ? "the discovered server" : describe(url);
         int gen = ++connectGen;
         connectButton.setEnabled(false);
@@ -385,7 +432,7 @@ public class TensorBrowserPanel extends JPanel {
                 if (!disposed) { // however it ended, the controls are usable again
                     connectButton.setEnabled(true);
                     address.setEnabled(true);
-                    token.setEnabled(true);
+                    syncToken.run();
                 }
                 Object[] r;
                 try {
@@ -397,7 +444,11 @@ public class TensorBrowserPanel extends JPanel {
                         status.setText(connection == null ? "Connection failed: " + why
                                 : "Connection to " + target + " failed (" + why
                                         + "); still connected to " + connectionName);
-                        errorDialog.accept(why);
+                        SwingUtilities.invokeLater(() -> {
+                            if (!disposed && gen == connectGen) { // not from a closed panel or a stale connect
+                                errorDialog.accept(why);
+                            }
+                        });
                     }
                     return;
                 }
