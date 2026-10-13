@@ -49,6 +49,13 @@ try {
         alloc.close()
     }
     println("OK Arrow allocation")
+
+    // 4. TLS: the SDK connection loads against Fiji's own netty (jars.sh checks the install left it alone);
+    //    gRPC falls back to the JDK TLS provider when netty's OpenSSL (tcnative) is unavailable.
+    Class.forName("biopb.tensor.Connection")
+    Class.forName("biopb.tensor.TlsTrusts")
+    def netty = io.netty.util.Version.identify().get("netty-common").artifactVersion()
+    println("OK TLS classes load (Fiji netty " + netty + ", OpenSSL " + io.netty.handler.ssl.OpenSsl.isAvailable() + ")")
 } catch (Throwable t) {
     t.printStackTrace()
     System.err.println("SMOKE FAILED: " + t)

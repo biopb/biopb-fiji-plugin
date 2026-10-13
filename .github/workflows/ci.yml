@@ -78,9 +78,13 @@ jobs:
           fi
           mv "$(dirname "$launcher")" ./Fiji.app
           chmod +x ./Fiji.app/fiji-linux-x64
-      # Copies the plugin jar and the dependencies Fiji lacks into the install.
+      # Copies the plugin jar and the dependencies Fiji lacks into the install. Fiji's own
+      # shared jars (netty, grpc-netty, ...) must survive untouched: TLS runs on Fiji's netty.
       - name: Install plugin into Fiji
-        run: mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+        run: |
+          .github/scripts/jars.sh before ./Fiji.app
+          mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+          .github/scripts/jars.sh after ./Fiji.app
       - name: Smoke test (headless)
         run: ./Fiji.app/fiji-linux-x64 --headless --run .github/scripts/smoke.groovy
       # Builds the real window in Fiji's GUI on a virtual display.

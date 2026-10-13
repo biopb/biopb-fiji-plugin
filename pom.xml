@@ -71,8 +71,12 @@
     <scijava.jvm.version>11</scijava.jvm.version>
     <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
 
-    <!-- catalogChildren (lazy catalog reads) is first in 0.13.0rc1. -->
-    <biopb.version>0.13.0rc1</biopb.version>
+    <!-- 0.13.0rc2 is the first release with TLS trust and the shared TOFU pin store
+         (biopb#1401); catalogChildren (lazy catalog reads) is from 0.13.0rc1. -->
+    <biopb.version>0.13.0rc2</biopb.version>
+
+    <!-- Fiji's own versions of the jars it shares; see the provided block below. -->
+    <fiji.netty.version>4.1.73.Final</fiji.netty.version>
 
     <!-- Arrow needs java.nio opened; Fiji's launcher provides this at runtime. -->
     <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
@@ -90,6 +94,106 @@
       <groupId>io.github.jiyuuchc</groupId>
       <artifactId>biopb</artifactId>
       <version>${biopb.version}</version>
+      <exclusions>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-buffer</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-codec</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-common</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-handler</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-resolver</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-transport</artifactId></exclusion>
+        <exclusion><groupId>io.netty</groupId><artifactId>netty-tcnative-classes</artifactId></exclusion>
+        <exclusion><groupId>io.grpc</groupId><artifactId>grpc-context</artifactId></exclusion>
+        <exclusion><groupId>io.grpc</groupId><artifactId>grpc-netty</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+
+    <!--
+      Fiji shares these netty jars (4.1.73) and tcnative-classes (2.0.46) with other plugins. The
+      SDK pulls newer ones, and "mvn install -Dscijava.app.directory" would replace Fiji's, so they
+      are provided here: not copied into Fiji. TLS works on Fiji's versions (the jars Fiji lacks:
+      netty-tcnative-boringssl-static, netty-codec-socks, handler-proxy, grpc-netty, arrow, ... are
+      still installed).
+    -->
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-buffer</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-common</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-resolver</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport</artifactId>
+      <version>${fiji.netty.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-tcnative-classes</artifactId>
+      <version>2.0.46.Final</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.grpc</groupId>
+      <artifactId>grpc-netty</artifactId>
+      <version>1.70.0</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-http</artifactId>
+      <version>4.1.135.Final</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-http2</artifactId>
+      <version>4.1.135.Final</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-unix-common</artifactId>
+      <version>4.1.135.Final</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Not in Fiji: installed with the plugin. -->
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler-proxy</artifactId>
+      <version>4.1.110.Final</version>
+      <scope>compile</scope>
+      <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-socks</artifactId>
+      <version>4.1.110.Final</version>
+      <scope>compile</scope>
+      <exclusions><exclusion><groupId>*</groupId><artifactId>*</artifactId></exclusion></exclusions>
     </dependency>
 
     <!-- Provided by Fiji at runtime. -->

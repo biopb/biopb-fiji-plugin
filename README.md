@@ -11,7 +11,7 @@ the server when you look at them.
 - **Fiji Latest** (bundles Java 21). **Fiji Stable (Java 8) is not supported**:
   the biopb SDK is compiled for Java 11.
 - A biopb tensor server. Lazy catalog browsing needs the server and SDK from
-  biopb 0.13.0rc1 (`catalog_children`).
+  biopb 0.13.0rc2 (`catalog_children`, TLS trust).
 
 ## Install
 
@@ -23,7 +23,8 @@ the server when you look at them.
 
       mvn install -DskipTests -Dscijava.app.directory=/path/to/Fiji.app -Ddelete.other.versions=true
 
-  Restart Fiji. Fiji's launcher unlocks `java.nio` for Arrow, so no JVM flag is needed.
+  Fiji's own shared jars (netty, grpc-netty, ...) are left alone: the build only adds jars Fiji lacks,
+  and CI checks it. Restart Fiji. Fiji's launcher unlocks `java.nio` for Arrow, so no JVM flag is needed.
 
 ## Usage
 
@@ -31,8 +32,14 @@ the server when you look at them.
    brings the same window to the front). Closing the window does not affect images
    already opened from it: the server connection stays open until the last of those
    images is closed, and then closes.
-2. Enter the server as `host[:port]` (default `localhost:8815`, or the
-   `BIOPB_TENSOR_URL` environment variable) and press **Connect**.
+2. Enter the server and press **Connect**: `host[:port]` (plaintext; default
+   `localhost:8815`, or the `BIOPB_TENSOR_URL` environment variable), `grpc://host:port`, or
+   `grpc+tls://host:port` (`grpcs://` also works) for TLS. Leave the address **empty** to
+   discover the server the way the Python clients do (`BIOPB_TENSOR_URL`, then the local
+   biopb control plane). The status line says whether the connection is plaintext or TLS;
+   a failure is shown there and in a dialog, with what to do about it (token rejected, certificate
+   changed, ...). The **Token** field (default `BIOPB_TENSOR_TOKEN`) is sent only to the address typed in
+   the field; it is never logged or shown, and is ignored when the address is empty.
 3. Browse the catalog (folders load as you expand them), or type in the search box
    (searched on the server).
 4. **Double-click** a tensor to open it at full resolution. Right-click it for
@@ -57,6 +64,24 @@ stopped with **Cancel resolve** (it takes effect at the next server heartbeat, a
 finish the download anyway and cache it). When it ends, only that row is replaced, by the
 tensors found, and the status line says how many (or why it failed). Servers that do not report a
 reason treat every unresolved source as a cloud file, as the napari widget does.
+
+### TLS
+
+Connections go through the biopb SDK's `Connection`, so trust works as in the Python clients. For a
+`grpc+tls://` server, in order:
+
+1. `BIOPB_TENSOR_TLS_CA`: a PEM file (a private CA, or the server's own certificate); checked on every connect.
+2. `BIOPB_TENSOR_TLS_FINGERPRINT`: the certificate's SHA-256, as `biopb-tensor-server cert init` prints it; checked on every connect.
+3. Otherwise **trust on first use**: the first time you connect to a `host:port` its certificate is pinned,
+   and a different certificate later is refused (never silently re-pinned). A server on this machine is
+   verified against the certificate it serves instead.
+
+Set these in the environment Fiji is started from. Pins live in `~/.local/state/biopb/tls-known-hosts.json`
+(`$BIOPB_STATE_HOME/biopb/` if `BIOPB_STATE_HOME` is set; same path on every platform): a JSON object mapping
+`host:port` to the pinned certificate, **shared with the Python clients and the napari widget**, so a pin made by
+one holds for all. To accept a legitimately rotated certificate, delete that `host:port` entry from the file
+(or the file) and connect again; a pin-mismatch message that you did not expect may be a
+man-in-the-middle, so check before you do.
 
 ### Assumptions
 
