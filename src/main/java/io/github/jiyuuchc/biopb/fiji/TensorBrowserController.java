@@ -306,6 +306,11 @@ public class TensorBrowserController implements TensorBrowserListener {
     }
 
     @Override
+    public void resolveFailed(String title, String message) {
+        ui.error(title, message);
+    }
+
+    @Override
     public void roisRequested(String arrayId) {
         RefCountedConnection current = connection.get();
         if (current == null) {

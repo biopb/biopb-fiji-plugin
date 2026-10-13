@@ -25,4 +25,7 @@ public interface TensorBrowserListener {
      * @param busy whether a resolve is still running
      */
     default void resolveStatus(String text, boolean busy) { }
+
+    /** A resolve failed: the host should tell the user (modally, as the napari widget does). */
+    default void resolveFailed(String title, String message) { }
 }

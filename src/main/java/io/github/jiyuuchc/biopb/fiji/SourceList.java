@@ -384,9 +384,8 @@ public final class SourceList implements AutoCloseable {
             LOG.log(Level.FINE, "Re-list after resolving '" + sourceId + "' failed", e);
         }
         Map<String, Object> committed = Collections.unmodifiableMap(row);
-        CatalogClient now = connection.get();
         synchronized (lock) {
-            checkCurrent(client, startEpoch, now);
+            checkCurrent(client, startEpoch, connection.get()); // read here: no gap before the merge
             Object id = row.get("source_id");
             String key = id instanceof String ? (String) id : sourceId;
             Map<String, Object> held = sources.get(key);

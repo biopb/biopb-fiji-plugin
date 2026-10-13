@@ -433,4 +433,11 @@ public class TensorBrowserControllerTest {
         await(() -> seen.contains("Opened a|true"));
         assertFalse(seen.contains(" |false"));
     }
+
+    @Test
+    public void aResolveFailureGoesToTheErrorDialog() throws Exception {
+        TensorBrowserController c = controller((cl, id, lvl, ax) -> image(id, lvl));
+        edt(() -> c.resolveFailed("Resolve failed", "disk full"));
+        assertTrue(log.contains("error:Resolve failed"));
+    }
 }

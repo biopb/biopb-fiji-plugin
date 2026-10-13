@@ -52,7 +52,7 @@ glyph for a cloud file, `⋯` for one still being indexed, `[failed]` for one th
 register. Opening it does nothing; **double-click** it or use **right-click > Resolve** (labelled
 *Load now* for a pending source and *Retry loading* for a failed one). Resolving a cloud file
 **downloads the whole file** (minutes, local disk, not offline), so it asks first; the other two
-do not. It runs in the background, shows the server's progress in the status line, and can be
+do not. One resolve runs at a time (a second request is ignored with a status note). It runs in the background, shows the server's progress in the status line, and can be
 stopped with **Cancel resolve** (it takes effect at the next server heartbeat, and the server may
 finish the download anyway and cache it). When it ends, only that row is replaced, by the
 tensors found, and the status line says how many (or why it failed). Servers that do not report a

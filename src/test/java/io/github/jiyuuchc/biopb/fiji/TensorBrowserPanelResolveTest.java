@@ -40,6 +40,8 @@ public class TensorBrowserPanelResolveTest {
         final CountDownLatch release = new CountDownLatch(1);
         volatile String failWith;
         volatile boolean sawCancel;
+        volatile Map<String, Object> terminal; // the row to answer with instead of a resolved one
+        final CountDownLatch exited = new CountDownLatch(1); // the resolver call has returned or thrown
 
         static Map<String, Object> row(String id, String url, String reason) {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -67,6 +69,15 @@ public class TensorBrowserPanelResolveTest {
         @Override
         public Map<String, Object> resolveSource(String id, Consumer<ResolveProgress> onProgress,
                 BooleanSupplier shouldCancel) throws IOException {
+            try {
+                return resolve(id, onProgress, shouldCancel);
+            } finally {
+                exited.countDown();
+            }
+        }
+
+        private Map<String, Object> resolve(String id, Consumer<ResolveProgress> onProgress,
+                BooleanSupplier shouldCancel) throws IOException {
             resolveCalls.incrementAndGet();
             onProgress.accept(new ResolveProgress(3.2, "cloud.svs", 2048));
             started.countDown();
@@ -83,6 +94,9 @@ public class TensorBrowserPanelResolveTest {
             if (failWith != null) {
                 throw new IOException(failWith);
             }
+            if (terminal != null) {
+                return terminal;
+            }
             Map<String, Object> done = row(id, "/x/cloud.svs", null);
             done.put("is_resolved", true);
             done.put("tensors", Arrays.asList(TreeModelBuilderTest.tensor("cloud/0", "uint8", 4, 4)));
@@ -97,6 +111,7 @@ public class TensorBrowserPanelResolveTest {
     private TensorBrowserPanel panel;
     private final List<String> asked = new CopyOnWriteArrayList<>();
     private final List<String> heard = new CopyOnWriteArrayList<>();
+    private final List<String> errors = new CopyOnWriteArrayList<>();
     private volatile boolean consent = true;
 
     @Before
@@ -116,6 +131,7 @@ public class TensorBrowserPanelResolveTest {
             @Override public void openRequested(String arrayId, int level) { }
             @Override public void roisRequested(String arrayId) { }
             @Override public void resolveStatus(String text, boolean busy) { heard.add(text + "|" + busy); }
+            @Override public void resolveFailed(String title, String message) { errors.add(title + ": " + message); }
         });
         edt(panel::connect);
         await(() -> child("cloud.svs") != null);
@@ -155,6 +171,13 @@ public class TensorBrowserPanelResolveTest {
         return null;
     }
 
+    /** Lets everything already queued on the EDT (a dropped worker's done()) run. */
+    private static void settle() throws Exception {
+        for (int i = 0; i < 5; i++) {
+            SwingUtilities.invokeAndWait(() -> { });
+        }
+    }
+
     private String status() {
         return panel.getStatusLabel().getText();
     }
@@ -171,7 +194,7 @@ public class TensorBrowserPanelResolveTest {
         assertTrue(heard.get(heard.size() - 1).endsWith("|true"));
 
         edt(() -> panel.resolveSource("cloud")); // a second request is ignored
-        assertTrue(status(), status().contains("already being resolved"));
+        assertTrue(status(), status().startsWith("Already resolving 'cloud.svs'"));
         assertEquals(1, fake.resolveCalls.get());
 
         fake.release.countDown();
@@ -191,6 +214,7 @@ public class TensorBrowserPanelResolveTest {
         assertEquals(0, fake.resolveCalls.get());
         fake.release.countDown();
         edt(() -> panel.resolveSource("pending"));
+        await(() -> fake.resolveCalls.get() == 1 && status().startsWith("Resolved"));
         edt(() -> panel.resolveSource("failed"));
         await(() -> fake.resolveCalls.get() == 2);
         assertEquals(1, asked.size());
@@ -215,6 +239,8 @@ public class TensorBrowserPanelResolveTest {
         fake.release.countDown();
         await(() -> status().startsWith("Resolve failed"));
         assertTrue(status(), status().contains("disk full"));
+        assertEquals(1, errors.size());
+        assertTrue(errors.get(0), errors.get(0).startsWith("Resolve failed:") && errors.get(0).contains("disk full"));
         assertEquals("[failed]", TreeModelBuilder.nodeOf(child("failed.svs")).getSuffix());
         assertFalse(panel.getCancelResolveButton().isVisible());
     }
@@ -224,14 +250,89 @@ public class TensorBrowserPanelResolveTest {
         edt(() -> panel.resolveSource("pending"));
         assertTrue(fake.started.await(10, TimeUnit.SECONDS));
         edt(panel::connect); // a new connection: the running resolve is cancelled and forgotten
-        await(() -> fake.sawCancel);
-        Thread.sleep(300);
+        assertTrue(fake.exited.await(10, TimeUnit.SECONDS)); // the resolver saw the cancel on its own
+        assertTrue(fake.sawCancel);
+        settle();
         edt(() -> {
             assertFalse(status(), status().startsWith("Cancelled"));
             assertFalse(status(), status().startsWith("Resolve"));
             assertFalse(panel.getCancelResolveButton().isVisible());
         });
         assertEquals(" |false", heard.get(heard.size() - 1));
+        assertTrue(errors.isEmpty());
+    }
+
+    @Test
+    public void disposingMidResolveShowsNothingAfterwards() throws Exception {
+        edt(() -> panel.resolveSource("pending"));
+        assertTrue(fake.started.await(10, TimeUnit.SECONDS));
+        String before = status();
+        edt(panel::dispose);
+        int heardAfterDispose = heard.size();
+        fake.failWith = "late failure";
+        fake.release.countDown();
+        assertTrue(fake.exited.await(10, TimeUnit.SECONDS));
+        settle();
+        assertEquals(before, status());
+        assertEquals(heardAfterDispose, heard.size());
+        assertTrue(errors.isEmpty());
+        assertTrue(fake.sawCancel || fake.resolveCalls.get() == 1);
+    }
+
+    @Test
+    public void aTerminalRowStillFailedIsAFailureWithItsBadge() throws Exception {
+        Map<String, Object> failed = Fake.row("failed", "/x/failed.svs", "failed");
+        fake.terminal = failed;
+        edt(() -> panel.resolveSource("failed"));
+        fake.release.countDown();
+        await(() -> status().startsWith("Resolve failed"));
+        assertEquals(1, errors.size());
+        assertEquals("[failed]", TreeModelBuilder.nodeOf(child("failed.svs")).getSuffix());
+        // a pending one is a failure too, and is drawn pending
+        fake.terminal = Fake.row("pending", "/x/pending.svs", "pending");
+        edt(() -> panel.resolveSource("pending"));
+        await(() -> errors.size() == 2);
+        assertEquals(TreeModelBuilder.PENDING_GLYPH, TreeModelBuilder.nodeOf(child("pending.svs")).getSuffix());
+    }
+
+    @Test
+    public void onlyOneResolveRunsAtATime() throws Exception {
+        edt(() -> panel.resolveSource("pending"));
+        assertTrue(fake.started.await(10, TimeUnit.SECONDS));
+        edt(() -> panel.resolveSource("failed")); // another source
+        assertTrue(status(), status().startsWith("Already resolving 'pending.svs'"));
+        edt(() -> panel.resolveSource("pending")); // the same one
+        assertTrue(status(), status().startsWith("Already resolving 'pending.svs'"));
+        assertEquals(1, fake.resolveCalls.get());
+        edt(() -> panel.getCancelResolveButton().doClick()); // cancels that one
+        await(() -> status().startsWith("Cancelled"));
+        assertTrue(fake.sawCancel);
+    }
+
+    @Test
+    public void aSourceResolvedWhileAskingIsNotResolvedAgain() throws Exception {
+        panel.confirmDownload = (title, message) -> {
+            Map<String, Object> done = Fake.row("cloud", "/x/cloud.svs", null);
+            done.put("is_resolved", true);
+            panel.getSourceListForTest().addSources(Collections.singletonMap("cloud", done));
+            return true;
+        };
+        edt(() -> panel.resolveSource("cloud"));
+        assertEquals(0, fake.resolveCalls.get());
+        assertTrue(status(), status().contains("changed while asking"));
+        assertFalse(panel.getCancelResolveButton().isVisible());
+    }
+
+    @Test
+    public void aPanelDisposedWhileAskingResolvesAndSaysNothing() throws Exception {
+        panel.confirmDownload = (title, message) -> {
+            panel.dispose();
+            return true;
+        };
+        String before = status();
+        edt(() -> panel.resolveSource("cloud"));
+        assertEquals(0, fake.resolveCalls.get());
+        assertEquals(before, status());
     }
 
     @Test
@@ -262,13 +363,9 @@ public class TensorBrowserPanelResolveTest {
             t.setSize(400, 300);
             java.awt.Rectangle r = t.getPathBounds(new TreePath(child("pending.svs").getPath()));
             assertNotNull(r);
-            for (java.awt.event.MouseListener ml : t.getMouseListeners()) {
-                if (!ml.getClass().getName().contains("javax.swing")) {
-                    ml.mouseClicked(new java.awt.event.MouseEvent(t, java.awt.event.MouseEvent.MOUSE_CLICKED,
-                            System.currentTimeMillis(), 0, r.x + 5, r.y + r.height / 2, 2, false,
-                            java.awt.event.MouseEvent.BUTTON1));
-                }
-            }
+            t.dispatchEvent(new java.awt.event.MouseEvent(t, java.awt.event.MouseEvent.MOUSE_CLICKED,
+                    System.currentTimeMillis(), 0, r.x + 5, r.y + r.height / 2, 2, false,
+                    java.awt.event.MouseEvent.BUTTON1));
         });
         assertTrue(fake.started.await(10, TimeUnit.SECONDS));
         assertEquals(1, fake.resolveCalls.get());
