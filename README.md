@@ -124,7 +124,7 @@ These are the napari ProcessImage widgets' settings; **the Tensor Browser does n
 yet** (its address comes from the Connect field / `BIOPB_TENSOR_URL`, its limits are the constants
 above). The class is there so the file contract is shared and typed getters exist for features that
 need them. Saving rewrites only the keys the plugin set and keeps every other key in the file (including
-napari-only ones), via a temporary file renamed into place.
+napari-only ones), via a temporary file renamed into place (through a symlink to the real file, keeping its permissions; if the existing file cannot be read the save is skipped). A running instance notices the file changing. The lock is in-process only: with Fiji and napari writing at the same moment, the last writer wins. Without a usable home directory (and no `BIOPB_CONFIG_HOME`) nothing is persisted.
 
 ### Assumptions
 
