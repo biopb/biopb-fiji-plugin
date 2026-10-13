@@ -33,10 +33,15 @@ public final class MetadataTarget {
      * Describes {@code row}'s tensor {@code arrayId}; with {@code arrayId == null} the tensor is the
      * source's only one, if it has just one (a source with several, or none, has no tensor line).
      *
+     * @return the target, or {@code null} if the row is missing or has no source id
      * @param row a {@code sources} row ({@code source_id}, {@code source_url}, {@code tensors})
      */
     public static MetadataTarget of(Map<String, Object> row, String arrayId) {
-        String id = String.valueOf(row.get("source_id"));
+        Object rawId = row == null ? null : row.get("source_id");
+        if (rawId == null || rawId.toString().trim().isEmpty()) {
+            return null; // nothing to ask the server about
+        }
+        String id = rawId.toString();
         List<Map<?, ?>> tensors = tensors(row);
         Map<?, ?> t = null;
         for (Map<?, ?> c : tensors) {
@@ -55,21 +60,6 @@ public final class MetadataTarget {
         }
         return new MetadataTarget(id, String.valueOf(t.get("array_id")), path, shape(t.get("shape")),
                 t.get("dtype") == null ? "" : t.get("dtype").toString(), dims(t.get("dim_labels")), true);
-    }
-
-    /**
-     * The id of the source holding tensor {@code arrayId}, or {@code null} if none of {@code sources}
-     * does.
-     */
-    public static String sourceIdOf(Map<String, Map<String, Object>> sources, String arrayId) {
-        for (Map.Entry<String, Map<String, Object>> e : sources.entrySet()) {
-            for (Map<?, ?> t : tensors(e.getValue())) {
-                if (arrayId.equals(String.valueOf(t.get("array_id")))) {
-                    return e.getKey();
-                }
-            }
-        }
-        return null;
     }
 
     private static List<Map<?, ?>> tensors(Map<String, Object> row) {
@@ -104,6 +94,14 @@ public final class MetadataTarget {
             }
         }
         return sb.length() == 0 ? "N/A" : sb.toString();
+    }
+
+    /** A window title naming the source (and the tensor, when it is not just the source's only one). */
+    public String getTitle() {
+        List<String> parts = TreeModelBuilder.pathParts(path);
+        String name = parts.isEmpty() ? sourceId : parts.get(parts.size() - 1);
+        String array = arrayId == null ? "" : TreeModelBuilder.shortName(arrayId);
+        return "Metadata - " + name + (array.isEmpty() || array.equals(name) ? "" : " / " + array);
     }
 
     /** The source id. */

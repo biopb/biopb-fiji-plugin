@@ -4,7 +4,6 @@ import java.awt.BorderLayout;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Window;
-import java.util.Map;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -28,9 +27,12 @@ final class MetadataDialog extends JDialog {
     private final JTextArea body = new JTextArea("Loading…");
     private final CopyableIdRow sourceRow = new CopyableIdRow("Source");
     private final CopyableIdRow tensorRow = new CopyableIdRow("Tensor");
+    private final String key;
+    private transient java.util.concurrent.Future<?> read;
 
     MetadataDialog(Window owner, MetadataTarget target) {
-        super(owner, "Metadata", ModalityType.MODELESS);
+        super(owner, target.getTitle(), ModalityType.MODELESS);
+        this.key = keyOf(target);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
 
         JPanel head = new JPanel();
@@ -77,10 +79,35 @@ final class MetadataDialog extends JDialog {
         return f;
     }
 
-    /** Shows the server's metadata, empty entries filtered out. */
-    void showMetadata(Map<String, Object> metadata) {
-        body.setText(MetadataFormat.toText(metadata));
+    /** What identifies the window's subject, so asking again finds it. */
+    static String keyOf(MetadataTarget t) { return t.getSourceId() + "|" + t.getArrayId(); }
+
+    String key() { return key; }
+
+    /** Shows the (already formatted) metadata text. */
+    void showText(String text) {
+        body.setText(text);
         body.setCaretPosition(0);
+    }
+
+    /** The running read, to cancel when the window goes. */
+    void setRead(java.util.concurrent.Future<?> f) { read = f; }
+
+    /** Stops the read, if it is still running. */
+    void cancelRead() {
+        if (read != null) {
+            read.cancel(true);
+        }
+    }
+
+    void setOnCopied(java.util.function.Consumer<String> c) {
+        sourceRow.setOnCopied(c);
+        tensorRow.setOnCopied(c);
+    }
+
+    void setOnCopyFailed(Runnable r) {
+        sourceRow.setOnCopyFailed(r);
+        tensorRow.setOnCopyFailed(r);
     }
 
     /** Shows why the metadata could not be read, in place of it. */

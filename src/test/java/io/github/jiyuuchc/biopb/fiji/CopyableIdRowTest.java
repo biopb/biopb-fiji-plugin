@@ -21,6 +21,7 @@ public class CopyableIdRowTest {
         assertEquals(java.util.Arrays.asList("src/with spaces/0"), copied);
         assertEquals(copied, told);
         assertEquals("src/with spaces/0", row.value());
+        assertEquals("Copied", row.button().getText());
     }
 
     @Test
@@ -29,8 +30,12 @@ public class CopyableIdRowTest {
         List<String> told = new ArrayList<>();
         row.setCopier(v -> { throw new IllegalStateException("busy"); });
         row.setOnCopied(told::add);
+        List<String> failed = new ArrayList<>();
+        row.setOnCopyFailed(() -> failed.add("failed"));
         row.setValue("x");
         row.button().doClick();
         assertTrue(told.isEmpty());
+        assertEquals(1, failed.size());
+        assertEquals("Copy failed", row.button().getText());
     }
 }

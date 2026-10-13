@@ -17,6 +17,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
 import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
@@ -37,6 +39,7 @@ public class TensorBrowserPanelMetadataTest {
         volatile CountDownLatch gate;
         volatile String failWith;
         volatile boolean unsupported;
+        volatile boolean interrupted;
 
         @Override
         public Level catalogChildren(String key, int limit) {
@@ -61,6 +64,7 @@ public class TensorBrowserPanelMetadataTest {
                 try {
                     g.await(10, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
+                    interrupted = true;
                     throw new IOException(e);
                 }
             }
@@ -242,5 +246,79 @@ public class TensorBrowserPanelMetadataTest {
         assertEquals("many/1", pane.tensorRow().value());
         edt(() -> panel.getTree().clearSelection());
         assertFalse(pane.isVisible());
+    }
+
+    @Test
+    public void askingAgainBringsTheOpenWindowForwardInsteadOfOpeningAnother() throws Exception {
+        fake.gate = new CountDownLatch(1);
+        MetadataDialog d = openFor("one.zarr");
+        edt(() -> metadataItem(panel.menuFor(TreeModelBuilder.nodeOf(child("one.zarr")))).doClick());
+        assertEquals(1, panel.getMetadataDialogs().size());
+        assertEquals(Arrays.asList("one"), fake.asked);
+        fake.gate.countDown();
+        await(() -> d.bodyText().contains("scope-9"));
+    }
+
+    @Test
+    public void closingTheWindowCancelsItsRead() throws Exception {
+        fake.gate = new CountDownLatch(1);
+        MetadataDialog d = openFor("one.zarr");
+        await(() -> !fake.asked.isEmpty());
+        edt(d::dispose);
+        await(() -> fake.interrupted);
+        assertTrue(panel.getMetadataDialogs().isEmpty());
+    }
+
+    @Test
+    public void aRowWithoutACatalogEntrySaysSoInsteadOfDoingNothing() throws Exception {
+        TreeModelBuilder.Node ghost = TreeModelBuilder.nodeOf(TreeModelBuilder.sourceNode(TreeModelBuilderTest.source(
+                "gone", "/d/gone.zarr", TreeModelBuilderTest.tensor("gone/0", "u1", 1)), "gone.zarr"));
+        edt(() -> panel.showMetadata(ghost));
+        assertTrue(panel.getMetadataDialogs().isEmpty());
+        assertTrue(panel.getStatusLabel().getText(), panel.getStatusLabel().getText().startsWith("No metadata for 'gone.zarr'"));
+    }
+
+    @Test
+    public void tensorRowsKnowTheirSourceWithoutAScan() {
+        TreeModelBuilder.Node t = TreeModelBuilder.nodeOf(child("many.zarr").getChildAt(1));
+        assertEquals("many", t.getSourceId());
+        assertEquals("many", TreeModelBuilder.nodeOf(child("many.zarr")).getSourceId());
+    }
+
+    @Test
+    public void anUnsupportingServerIsNotLoggedAsAWarning() throws Exception {
+        java.util.logging.Logger log = java.util.logging.Logger.getLogger(TensorBrowserPanel.class.getName());
+        List<LogRecord> seen = new CopyOnWriteArrayList<>();
+        Handler h = new Handler() {
+            @Override public void publish(LogRecord r) { seen.add(r); }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        h.setLevel(java.util.logging.Level.ALL);
+        java.util.logging.Level old = log.getLevel();
+        log.setLevel(java.util.logging.Level.ALL);
+        log.addHandler(h);
+        try {
+            fake.unsupported = true;
+            MetadataDialog d = openFor("one.zarr");
+            await(() -> d.bodyText().contains("does not provide"));
+            for (LogRecord r : seen) {
+                assertTrue(r.getLevel().toString(), r.getLevel().intValue() < java.util.logging.Level.WARNING.intValue());
+            }
+            edt(d::dispose);
+            fake.unsupported = false;
+            fake.failWith = "boom";
+            MetadataDialog d2 = openFor("one.zarr");
+            await(() -> d2.bodyText().contains("boom"));
+            assertTrue(seen.stream().anyMatch(r -> r.getLevel() == java.util.logging.Level.WARNING && r.getThrown() != null));
+        } finally {
+            log.removeHandler(h);
+            log.setLevel(old);
+        }
+    }
+
+    @Test
+    public void dialogTitleNamesTheSource() throws Exception {
+        assertEquals("Metadata - one.zarr / 0", openFor("one.zarr").getTitle());
     }
 }

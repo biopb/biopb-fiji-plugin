@@ -76,6 +76,7 @@ public final class TreeModelBuilder {
         private final String tooltip;
         private final List<String> arrayIds;
         private final Unresolved unresolved;
+        private String sourceId = ""; // for a tensor row, the source it is under
 
         Node(Kind kind, String key, String text, String suffix, String tooltip, List<String> arrayIds) {
             this(kind, key, text, suffix, tooltip, arrayIds, Unresolved.NONE);
@@ -106,6 +107,8 @@ public final class TreeModelBuilder {
         public List<String> getArrayIds() { return arrayIds; }
         /** For a source row, why it is unresolved ({@link Unresolved#NONE} if it is not); it can be resolved unless NONE. */
         public Unresolved getUnresolved() { return unresolved; }
+        /** The id of the source this row is or is under; empty for a folder or note. */
+        public String getSourceId() { return kind == Kind.SOURCE ? key : sourceId; }
         /** Whether the row opens as one image (double-click). */
         public boolean isOpenable() { return arrayIds.size() == 1 && kind != Kind.FOLDER; }
         /** An identity that survives a rebuild, for selection. */
@@ -237,8 +240,10 @@ public final class TreeModelBuilder {
                 state);
         for (Map<?, ?> t : tensors) {
             String array = String.valueOf(t.get("array_id"));
-            n.add(node(Kind.TENSOR, array, shortName(array), tensorSuffix(t), array,
-                    Collections.singletonList(array)));
+            DefaultMutableTreeNode tn = node(Kind.TENSOR, array, shortName(array), tensorSuffix(t), array,
+                    Collections.singletonList(array));
+            nodeOf(tn).sourceId = id;
+            n.add(tn);
         }
         return n;
     }

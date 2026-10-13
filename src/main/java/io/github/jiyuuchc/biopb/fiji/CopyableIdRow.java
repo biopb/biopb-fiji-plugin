@@ -21,10 +21,13 @@ final class CopyableIdRow extends JPanel {
 
     private final String name;
     private final JTextField text = new JTextField();
-    private final JButton button = new JButton("Copy");
+    private static final String LABEL = "Copy";
+    private final JButton button = new JButton(LABEL);
     private String value = "";
     private transient Consumer<String> copier = CopyableIdRow::toClipboard;
     private transient Consumer<String> onCopied = v -> { };
+    private transient Runnable onFailed = () -> { };
+    private final javax.swing.Timer revert = new javax.swing.Timer(1500, e -> button.setText(LABEL));
 
     CopyableIdRow(String name) {
         super(new BorderLayout(4, 0));
@@ -39,6 +42,7 @@ final class CopyableIdRow extends JPanel {
         button.addActionListener(e -> copy());
         add(text, BorderLayout.CENTER);
         add(button, BorderLayout.EAST);
+        revert.setRepeats(false);
         setOpaque(false);
     }
 
@@ -58,15 +62,27 @@ final class CopyableIdRow extends JPanel {
     /** Told the value after each copy, to confirm it. */
     void setOnCopied(Consumer<String> c) { onCopied = c; }
 
+    /** Told when the clipboard could not be written. */
+    void setOnCopyFailed(Runnable r) { onFailed = r; }
+
     JButton button() { return button; }
 
     private void copy() {
         try {
             copier.accept(value);
         } catch (RuntimeException e) { // no clipboard (headless, or held by another process)
+            flash("Copy failed");
+            onFailed.run();
             return;
         }
+        flash("Copied");
         onCopied.accept(value);
+    }
+
+    /** The button says what happened for a moment, then goes back to its label. */
+    private void flash(String label) {
+        button.setText(label);
+        revert.restart();
     }
 
     private static void toClipboard(String v) {

@@ -59,16 +59,24 @@ public class MetadataTargetTest {
         row.put("source_id", "abc");
         MetadataTarget t = MetadataTarget.of(row, null);
         assertEquals("abc", t.getPath());
+        assertEquals("Metadata - abc", t.getTitle());
         assertFalse(t.hasTensor());
     }
 
     @Test
-    public void findsTheSourceOfATensor() {
-        Map<String, Map<String, Object>> sources = new LinkedHashMap<>();
-        sources.put("a", TreeModelBuilderTest.source("a", "/a", TreeModelBuilderTest.tensor("a/0", "u1", 1)));
-        sources.put("b", TreeModelBuilderTest.source("b", "/b", TreeModelBuilderTest.tensor("b/0", "u1", 1),
-                TreeModelBuilderTest.tensor("b/1", "u1", 1)));
-        assertEquals("b", MetadataTarget.sourceIdOf(sources, "b/1"));
-        assertNull(MetadataTarget.sourceIdOf(sources, "c/0"));
+    public void aMissingOrBlankSourceIdMeansNoTarget() {
+        Map<String, Object> row = new LinkedHashMap<>();
+        assertNull(MetadataTarget.of(row, null));
+        row.put("source_id", "  ");
+        assertNull(MetadataTarget.of(row, null));
+        assertNull(MetadataTarget.of(null, null));
+    }
+
+    @Test
+    public void titleNamesTheSourceAndTensor() {
+        Map<String, Object> row = TreeModelBuilderTest.source("s", "/d/many.zarr",
+                TreeModelBuilderTest.tensor("s/a", "u1", 1), TreeModelBuilderTest.tensor("s/b", "u1", 1));
+        assertEquals("Metadata - many.zarr", MetadataTarget.of(row, null).getTitle());
+        assertEquals("Metadata - many.zarr / b", MetadataTarget.of(row, "s/b").getTitle());
     }
 }

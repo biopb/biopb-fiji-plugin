@@ -12,6 +12,8 @@ import java.util.Map;
 public final class MetadataFormat {
     /** Shown when nothing is left to show. */
     public static final String NONE = "No metadata available";
+    /** Most characters of metadata text shown; a text area cannot sensibly hold more. */
+    public static final int MAX_CHARS = 200_000;
 
     private MetadataFormat() { }
 
@@ -74,7 +76,26 @@ public final class MetadataFormat {
         }
         StringBuilder sb = new StringBuilder();
         write(sb, filtered, 0);
-        return sb.toString();
+        return truncate(sb.toString(), MAX_CHARS);
+    }
+
+    /** {@code text} cut at a line end within {@code max} characters, with a note of how much is not shown. */
+    static String truncate(String text, int max) {
+        if (text.length() <= max) {
+            return text;
+        }
+        int cut = text.lastIndexOf('\n', max);
+        if (cut <= 0) {
+            cut = max;
+        }
+        int more = 0;
+        for (int i = cut; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                more++;
+            }
+        }
+        return text.substring(0, cut) + "\n… " + more + " more lines (" + (text.length() - cut)
+                + " characters) not shown";
     }
 
     private static void write(StringBuilder sb, Object v, int depth) {

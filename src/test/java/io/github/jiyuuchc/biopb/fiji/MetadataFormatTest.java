@@ -101,4 +101,28 @@ public class MetadataFormatTest {
         List<Object> none = new ArrayList<>();
         assertEquals(MetadataFormat.NONE, MetadataFormat.toText(map("k", none)));
     }
+
+    @Test
+    public void hugeTextIsCutAtALineWithANote() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 100; i++) {
+            sb.append("line ").append(i).append('\n');
+        }
+        String cut = MetadataFormat.truncate(sb.toString(), 50);
+        assertTrue(cut, cut.startsWith("line 0\nline 1\n"));
+        assertTrue(cut, cut.length() < 150);
+        assertTrue(cut, cut.matches("(?s).*\\n… \\d+ more lines \\(\\d+ characters\\) not shown"));
+        assertEquals("short", MetadataFormat.truncate("short", 50));
+    }
+
+    @Test
+    public void toTextCapsAtMaxChars() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        for (int i = 0; i < 20000; i++) {
+            m.put("key" + i, "value value value " + i);
+        }
+        String t = MetadataFormat.toText(m);
+        assertTrue(t.length() < MetadataFormat.MAX_CHARS + 200);
+        assertTrue(t.contains("more lines"));
+    }
 }

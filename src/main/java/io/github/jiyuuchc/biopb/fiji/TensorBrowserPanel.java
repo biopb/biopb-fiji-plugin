@@ -290,7 +290,12 @@ public class TensorBrowserPanel extends JPanel {
         }
     });
     private final JButton cancelResolve = new JButton("Cancel resolve");
-    private final MetadataPane infoPane = new MetadataPane(v -> status.setText("Copied " + v));
+    private final MetadataPane infoPane = new MetadataPane(v -> status.setText("Copied " + v), this::copyFailed);
+    private final java.util.concurrent.ExecutorService metadataReads = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "biopb-metadata");
+        t.setDaemon(true);
+        return t;
+    });
     private final Set<MetadataDialog> metadataDialogs = new HashSet<>(); // open, non-modal; closed with the connection
     /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
     BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
@@ -522,6 +527,7 @@ public class TensorBrowserPanel extends JPanel {
     public void dispose() {
         disposed = true;
         closeMetadataDialogs();
+        metadataReads.shutdownNow();
         forgetResolve();
         connectGen++;
         searchGen++;
@@ -955,77 +961,110 @@ public class TensorBrowserPanel extends JPanel {
 
     // --- metadata ------------------------------------------------------------
 
-    /** What the pane and dialog say about row {@code n}, or {@code null} if it is not a source or tensor on the list. */
+    /**
+     * What the pane and dialog say about row {@code n}, or {@code null} if it is not a source or tensor
+     * the list has a row for. The source is the row's own (a tensor row knows the source it is under), looked
+     * up by the id selection and resolve use; nothing is scanned.
+     */
     private MetadataTarget targetOf(TreeModelBuilder.Node n) {
         SourceList l = list;
-        if (l == null || n == null) {
+        if (l == null || n == null || n.getSourceId().isEmpty()
+                || n.getKind() != TreeModelBuilder.Kind.SOURCE && n.getKind() != TreeModelBuilder.Kind.TENSOR) {
             return null;
         }
-        Map<String, Map<String, Object>> sources = l.getSources();
-        if (n.getKind() == TreeModelBuilder.Kind.SOURCE) {
-            Map<String, Object> row = sources.get(n.getKey());
-            return row == null ? null : MetadataTarget.of(row, n.getArrayIds().size() == 1 ? n.getArrayIds().get(0) : null);
+        Map<String, Object> row = l.getSources().get(n.getSourceId());
+        if (row == null) {
+            return null;
         }
-        if (n.getKind() == TreeModelBuilder.Kind.TENSOR) {
-            String sourceId = MetadataTarget.sourceIdOf(sources, n.getKey());
-            return sourceId == null ? null : MetadataTarget.of(sources.get(sourceId), n.getKey());
-        }
-        return null;
+        String arrayId = n.getKind() == TreeModelBuilder.Kind.TENSOR ? n.getKey()
+                : n.getArrayIds().size() == 1 ? n.getArrayIds().get(0) : null;
+        return MetadataTarget.of(row, arrayId);
     }
 
     private void updateInfoPane() {
         infoPane.show(targetOf(TreeModelBuilder.nodeOf(tree.getLastSelectedPathComponent())));
     }
 
+    private void copyFailed() { status.setText("Could not copy to the clipboard"); }
+
     /**
      * Opens the metadata window for row {@code n} at once, in a loading state, and reads the metadata
-     * off the EDT. The answer is dropped (and the window closed) if the connection was replaced or the
-     * panel disposed meanwhile; a failure is shown in the window.
+     * on a thread of the panel's own (so a hung call cannot hold up anything else). Asking again for what
+     * is already open brings that window forward. Closing the window cancels its read; the answer is
+     * dropped (and the window closed) if the connection was replaced or the panel disposed meanwhile; a
+     * failure is shown in the window. A row with nothing to ask about says so in the status line.
      */
     void showMetadata(TreeModelBuilder.Node n) {
-        MetadataTarget target = targetOf(n);
         Connection c = connection;
-        if (target == null || c == null || disposed) {
+        if (c == null || disposed) {
             return;
         }
+        MetadataTarget target = targetOf(n);
+        if (target == null) {
+            status.setText("No metadata for '" + n.getText() + "': the catalog has no usable entry for it");
+            return;
+        }
+        for (MetadataDialog open : metadataDialogs) {
+            if (open.key().equals(MetadataDialog.keyOf(target))) {
+                open.toFront();
+                open.requestFocus();
+                return;
+            }
+        }
         MetadataDialog dialog = new MetadataDialog(SwingUtilities.getWindowAncestor(this), target);
-        dialog.sourceRow().setOnCopied(v -> status.setText("Copied " + v));
-        dialog.tensorRow().setOnCopied(v -> status.setText("Copied " + v));
+        dialog.setOnCopied(v -> status.setText("Copied " + v));
+        dialog.setOnCopyFailed(this::copyFailed);
         metadataDialogs.add(dialog);
         dialog.addWindowListener(new java.awt.event.WindowAdapter() {
-            @Override public void windowClosed(java.awt.event.WindowEvent e) { metadataDialogs.remove(dialog); }
+            @Override public void windowClosed(java.awt.event.WindowEvent e) {
+                metadataDialogs.remove(dialog);
+                dialog.cancelRead();
+            }
         });
         dialog.setVisible(true);
         String sourceId = target.getSourceId();
-        new SwingWorker<Map<String, Object>, Void>() {
-            @Override protected Map<String, Object> doInBackground() throws IOException {
-                return c.catalog().getSourceMetadata(sourceId);
-            }
-
-            @Override protected void done() {
-                if (disposed || c != connection || !dialog.isDisplayable()) {
-                    dialog.dispose(); // stale (or already closed by the user): nothing to show it in
-                    return;
-                }
+        try {
+            dialog.setRead(metadataReads.submit(() -> {
+                String text = null;
+                Throwable failure = null;
                 try {
-                    dialog.showMetadata(get());
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } catch (ExecutionException e) {
-                    Throwable why = e.getCause() != null ? e.getCause() : e;
-                    LOG.log(Level.WARNING, "Could not read the metadata of " + sourceId, why);
-                    dialog.showError(why instanceof UnsupportedOperationException
-                            ? "this server does not provide source metadata" : OpenFailure.describe(why));
-                } catch (java.util.concurrent.CancellationException e) {
-                    dialog.dispose();
+                    text = MetadataFormat.toText(c.catalog().getSourceMetadata(sourceId)); // formatted off the EDT
+                } catch (Throwable t) {
+                    failure = t;
                 }
-            }
-        }.execute();
+                String shown = text;
+                Throwable why = failure;
+                if (Thread.currentThread().isInterrupted()) {
+                    return; // cancelled: the window is gone
+                }
+                SwingUtilities.invokeLater(() -> {
+                    if (disposed || c != connection || !dialog.isDisplayable()) {
+                        dialog.dispose(); // stale (or closed by the user): nothing to show it in
+                    } else if (why == null) {
+                        dialog.showText(shown);
+                    } else {
+                        dialog.showError(metadataFailure(sourceId, why));
+                    }
+                });
+            }));
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            dialog.dispose(); // the panel is being disposed
+        }
+    }
+
+    /** The message for a failed metadata read; an unsupporting server is an expected state, not logged as a fault. */
+    private static String metadataFailure(String sourceId, Throwable why) {
+        if (why instanceof UnsupportedOperationException) {
+            LOG.log(Level.FINE, "Server has no source metadata for " + sourceId, why);
+            return "this server does not provide source metadata";
+        }
+        LOG.log(Level.WARNING, "Could not read the metadata of " + sourceId, why);
+        return OpenFailure.describe(why);
     }
 
     private void closeMetadataDialogs() {
         for (MetadataDialog d : new ArrayList<>(metadataDialogs)) {
-            d.dispose();
+            d.dispose(); // its windowClosed cancels the read
         }
         metadataDialogs.clear();
     }

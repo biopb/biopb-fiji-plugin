@@ -19,11 +19,12 @@ final class MetadataPane extends JPanel {
     private final CopyableIdRow tensorRow = new CopyableIdRow("Tensor");
     private final JTextField lines = new JTextField();
 
-    MetadataPane(Consumer<String> onCopied) {
+    MetadataPane(Consumer<String> onCopied, Runnable onCopyFailed) {
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
         for (CopyableIdRow r : new CopyableIdRow[] {sourceRow, tensorRow}) {
             r.setOnCopied(onCopied);
+            r.setOnCopyFailed(onCopyFailed);
             add(r);
         }
         lines.setEditable(false);
