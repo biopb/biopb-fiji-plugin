@@ -18,6 +18,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -183,6 +186,11 @@ public class TensorBrowserPanel extends JPanel {
     private String selectedId;
     private String viewKey = "";
     private volatile Set<String> openSnapshot = Collections.emptySet(); // read by SourceList's threads
+    private final Map<String, AtomicBoolean> resolving = new HashMap<>(); // running resolves, by source id; the flag asks to cancel
+    private final JButton cancelResolve = new JButton("Cancel resolve");
+    /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
+    BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
+            title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE) == JOptionPane.OK_OPTION;
 
     /** A panel connecting through {@link #flightFactory()}, starting at {@code BIOPB_TENSOR_URL}. */
     public TensorBrowserPanel() {
@@ -208,6 +216,8 @@ public class TensorBrowserPanel extends JPanel {
         bar.add(new JLabel("Server"));
         bar.add(address);
         bar.add(connectButton);
+        cancelResolve.setVisible(false);
+        bar.add(cancelResolve);
         JPanel top = new JPanel(new BorderLayout(0, 2));
         top.add(bar, BorderLayout.NORTH);
         top.add(status, BorderLayout.CENTER);
@@ -227,6 +237,7 @@ public class TensorBrowserPanel extends JPanel {
             @Override public void changedUpdate(DocumentEvent e) { debounce.restart(); }
         });
         connectButton.addActionListener(e -> connect());
+        cancelResolve.addActionListener(e -> cancelResolves(false));
         address.addActionListener(e -> connect());
         tree.addTreeExpansionListener(new TreeExpansionListener() {
             @Override public void treeExpanded(TreeExpansionEvent e) { onExpanded(e.getPath()); }
@@ -244,7 +255,10 @@ public class TensorBrowserPanel extends JPanel {
             @Override public void mouseClicked(MouseEvent e) {
                 if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
                     TreeModelBuilder.Node n = nodeAt(e.getPoint());
-                    if (n != null && n.isOpenable()) {
+                    if (n != null && n.getKind() == TreeModelBuilder.Kind.SOURCE
+                            && n.getUnresolved() != TreeModelBuilder.Unresolved.NONE) {
+                        resolveSource(n.getKey()); // an unresolved source has nothing to open: resolve it
+                    } else if (n != null && n.isOpenable()) {
                         fireOpen(n.getArrayIds().get(0), 0);
                     }
                 }
@@ -335,6 +349,7 @@ public class TensorBrowserPanel extends JPanel {
     /** Stops the watcher and closes the connection; the panel is not used again. */
     public void dispose() {
         disposed = true;
+        cancelResolves(true);
         connectGen++;
         searchGen++;
         inFlight = false;
@@ -383,6 +398,7 @@ public class TensorBrowserPanel extends JPanel {
     }
 
     private void install(Connection c, SourceList l, String name) {
+        cancelResolves(true);
         release(connection, list);
         connection = c;
         connectionName = name;
@@ -725,6 +741,15 @@ public class TensorBrowserPanel extends JPanel {
     /** The context menu of a row, or {@code null} for a row that opens nothing. */
     JPopupMenu menuFor(TreeModelBuilder.Node n) {
         List<String> ids = n.getArrayIds();
+        if (n.getKind() == TreeModelBuilder.Kind.SOURCE && n.getUnresolved() != TreeModelBuilder.Unresolved.NONE) {
+            JPopupMenu menu = new JPopupMenu(); // nothing else is offered until it is resolved
+            String id = n.getKey();
+            menu.add(resolving.containsKey(id) ? item("Cancel resolve", () -> cancelResolve(id))
+                    : item(n.getUnresolved() == TreeModelBuilder.Unresolved.CLOUD ? "Resolve (downloads file)…"
+                            : n.getUnresolved() == TreeModelBuilder.Unresolved.FAILED ? "Retry loading" : "Load now",
+                            () -> resolveSource(id)));
+            return menu;
+        }
         if (n.getKind() == TreeModelBuilder.Kind.FOLDER || n.getKind() == TreeModelBuilder.Kind.NOTE
                 || ids.isEmpty()) {
             return null;
@@ -755,6 +780,176 @@ public class TensorBrowserPanel extends JPanel {
         JMenuItem i = new JMenuItem(text);
         i.addActionListener(e -> action.run());
         return i;
+    }
+
+    // --- resolving -----------------------------------------------------------
+
+    /**
+     * Resolves an unresolved source off the EDT, as the napari widget does: a cloud source asks first
+     * (it downloads the file), a pending or failed one does not. Heartbeats and the outcome go to the
+     * status line and to the listeners; on success only that source's row is replaced in place. A second
+     * request for a source already being resolved is ignored, and an outcome that arrives after the
+     * connection was replaced is dropped.
+     */
+    void resolveSource(String sourceId) {
+        SourceList l = list;
+        Map<String, Object> d = l == null || disposed ? null : l.getSources().get(sourceId);
+        TreeModelBuilder.Unresolved state = d == null ? TreeModelBuilder.Unresolved.NONE
+                : TreeModelBuilder.unresolvedState(d);
+        if (state == TreeModelBuilder.Unresolved.NONE) {
+            return;
+        }
+        List<String> parts = TreeModelBuilder.pathParts(String.valueOf(d.get("source_url")));
+        String name = parts.isEmpty() ? sourceId : parts.get(parts.size() - 1);
+        if (resolving.containsKey(sourceId)) {
+            say("'" + name + "' is already being resolved");
+            return;
+        }
+        boolean cloud = state == TreeModelBuilder.Unresolved.CLOUD;
+        if (cloud && !confirmDownload.test("Resolve cloud source", "Resolving '" + name
+                + "' downloads the entire file from remote storage.\n\nThis may take several minutes, use local "
+                + "disk space, and will not work offline. Continue?")) {
+            return;
+        }
+        String verb = cloud ? "Resolving" : "Loading";
+        AtomicBoolean cancel = new AtomicBoolean();
+        resolving.put(sourceId, cancel);
+        cancelResolve.setVisible(true);
+        say(verb + " '" + name + "'…");
+        new SwingWorker<Map<String, Object>, CatalogClient.ResolveProgress>() {
+            @Override protected Map<String, Object> doInBackground() throws Exception {
+                return l.resolve(sourceId, this::publish, cancel::get);
+            }
+
+            @Override protected void process(List<CatalogClient.ResolveProgress> chunks) {
+                if (l != list || resolving.get(sourceId) != cancel || cancel.get()) {
+                    return;
+                }
+                CatalogClient.ResolveProgress p = chunks.get(chunks.size() - 1);
+                String label = verb + " '" + (p.getTargetName().isEmpty() ? name : p.getTargetName()) + "'… "
+                        + (long) p.getElapsedSeconds() + "s";
+                say(p.getTargetBytes() > 0 ? label + " (" + humanBytes(p.getTargetBytes()) + ")" : label);
+            }
+
+            @Override protected void done() {
+                if (l != list) {
+                    return; // another connection now (or disposed): the answer is dropped
+                }
+                resolving.remove(sourceId, cancel);
+                cancelResolve.setVisible(!resolving.isEmpty());
+                try {
+                    Map<String, Object> row = get();
+                    Map<String, Object> held = l.getSources().get(sourceId);
+                    int n = tensorCount(row);
+                    graftSource(sourceId, held == null ? row : held);
+                    say(n == 0 ? "Resolved '" + name + "': no readable tensors"
+                            : "Resolved '" + name + "': " + n + " tensor" + (n == 1 ? "" : "s"));
+                } catch (ExecutionException e) {
+                    Throwable why = e.getCause() == null ? e : e.getCause();
+                    if (why instanceof ResolveCancelledException) {
+                        say("Cancelled resolving '" + name + "'");
+                    } else {
+                        LOG.log(Level.FINE, "Resolve failed", why);
+                        say("Resolve failed for '" + name + "': "
+                                + (why.getMessage() != null ? why.getMessage() : why.getClass().getSimpleName()));
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }.execute();
+    }
+
+    private static int tensorCount(Map<String, Object> row) {
+        Object t = row.get("tensors");
+        return t instanceof java.util.Collection ? ((java.util.Collection<?>) t).size() : 0;
+    }
+
+    private static String humanBytes(long n) {
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        double v = n;
+        int u = 0;
+        while (v >= 1024 && u < units.length - 1) {
+            v /= 1024;
+            u++;
+        }
+        return u == 0 ? n + " B" : String.format(java.util.Locale.ROOT, "%.1f %s", v, units[u]);
+    }
+
+    /** Shows {@code text} in the status line and tells the listeners, busy while any resolve runs. */
+    private void say(String text) {
+        status.setText(text);
+        boolean busy = !resolving.isEmpty();
+        for (TensorBrowserListener l : listeners) {
+            l.resolveStatus(text, busy);
+        }
+    }
+
+    private void cancelResolve(String sourceId) {
+        AtomicBoolean flag = resolving.get(sourceId);
+        if (flag != null) {
+            flag.set(true);
+            say("Cancelling… (takes effect at the next server heartbeat)");
+        }
+    }
+
+    /** Asks every running resolve to stop; {@code forget} also drops them, so their outcomes are not shown. */
+    private void cancelResolves(boolean forget) {
+        if (resolving.isEmpty()) {
+            return;
+        }
+        for (AtomicBoolean flag : resolving.values()) {
+            flag.set(true);
+        }
+        if (forget) {
+            resolving.clear();
+            cancelResolve.setVisible(false);
+            for (TensorBrowserListener l : listeners) {
+                l.resolveStatus(" ", false);
+            }
+        } else {
+            say("Cancelling… (takes effect at the next server heartbeat)");
+        }
+    }
+
+    /**
+     * Replaces one source's row with its fresh descriptor, leaving the rest of the tree (open folders,
+     * scroll) alone; the row stays selected. A source that resolved to nothing loses its row.
+     */
+    private void graftSource(String sourceId, Map<String, Object> descriptor) {
+        if (searchResult != null && searchResult.containsKey(sourceId)) {
+            searchResult.put(sourceId, descriptor); // a later rebuild of the search view draws from this
+        }
+        DefaultMutableTreeNode old = null;
+        for (java.util.Enumeration<?> e = ((DefaultMutableTreeNode) model.getRoot()).preorderEnumeration();
+                old == null && e.hasMoreElements();) {
+            DefaultMutableTreeNode t = (DefaultMutableTreeNode) e.nextElement();
+            TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(t);
+            if (n != null && n.getKind() == TreeModelBuilder.Kind.SOURCE && n.getKey().equals(sourceId)) {
+                old = t;
+            }
+        }
+        if (old == null) {
+            return; // not on screen; the next full build draws it from the list
+        }
+        DefaultMutableTreeNode parent = (DefaultMutableTreeNode) old.getParent();
+        int index = parent.getIndex(old);
+        DefaultMutableTreeNode fresh = TreeModelBuilder.sourceNode(descriptor, TreeModelBuilder.nodeOf(old).getText());
+        rebuilding = true;
+        try {
+            model.removeNodeFromParent(old);
+            if (fresh != null) {
+                model.insertNodeInto(fresh, parent, index);
+                if (fresh.getChildCount() > 0) {
+                    openSources.add(sourceId); // show what the resolve found
+                    restoreExpansion(fresh);
+                }
+                selectedId = TreeModelBuilder.nodeOf(fresh).getId();
+                restoreSelection(false);
+            }
+        } finally {
+            rebuilding = false;
+        }
     }
 
     // --- rendering -----------------------------------------------------------
@@ -810,4 +1005,5 @@ public class TensorBrowserPanel extends JPanel {
     JLabel getStatusLabel() { return status; }
     JLabel getSearchStatusLabel() { return searchStatus; }
     JButton getConnectButton() { return connectButton; }
+    JButton getCancelResolveButton() { return cancelResolve; }
 }

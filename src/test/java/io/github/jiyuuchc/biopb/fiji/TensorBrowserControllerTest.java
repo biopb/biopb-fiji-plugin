@@ -398,4 +398,39 @@ public class TensorBrowserControllerTest {
         String s = TensorBrowserController.summary(r, 0);
         assertTrue(s, s.contains("Loaded 0 ROIs") && s.contains("skipped 2") && s.contains("truncated"));
     }
+
+    @Test
+    public void resolveStatusDrivesTheStatusLineAndSpinner() throws Exception {
+        List<String> seen = new CopyOnWriteArrayList<>();
+        TensorBrowserController.Ui recording = new TensorBrowserController.Ui() {
+            @Override public void status(String t, boolean busy) { seen.add(t + "|" + busy); }
+            @Override public void show(ImagePlus imp) { }
+            @Override public boolean confirm(String title, String m) { return false; }
+            @Override public String askAxes(String m, String prev) { return null; }
+            @Override public void error(String title, String m) { }
+        };
+        TensorBrowserController c = new TensorBrowserController(() -> active, recording,
+                (cl, id, lvl, ax) -> image(id, lvl), (cl, id, imp, info) -> null, images);
+        edt(() -> c.resolveStatus("Resolving 'x'… 3s", true));
+        edt(() -> c.resolveStatus("Resolved 'x': 1 tensor", false));
+        assertEquals(Arrays.asList("Resolving 'x'… 3s|true", "Resolved 'x': 1 tensor|false"), seen);
+    }
+
+    @Test
+    public void anOpenEndingDoesNotClearTheSpinnerOfARunningResolve() throws Exception {
+        List<String> seen = new CopyOnWriteArrayList<>();
+        TensorBrowserController.Ui recording = new TensorBrowserController.Ui() {
+            @Override public void status(String t, boolean busy) { seen.add(t + "|" + busy); }
+            @Override public void show(ImagePlus imp) { }
+            @Override public boolean confirm(String title, String m) { return false; }
+            @Override public String askAxes(String m, String prev) { return null; }
+            @Override public void error(String title, String m) { }
+        };
+        TensorBrowserController c = new TensorBrowserController(() -> active, recording,
+                (cl, id, lvl, ax) -> image(id, lvl), (cl, id, imp, info) -> null, images);
+        edt(() -> c.resolveStatus("Resolving 'x'…", true));
+        edt(() -> c.openRequested("a", 0));
+        await(() -> seen.contains("Opened a|true"));
+        assertFalse(seen.contains(" |false"));
+    }
 }

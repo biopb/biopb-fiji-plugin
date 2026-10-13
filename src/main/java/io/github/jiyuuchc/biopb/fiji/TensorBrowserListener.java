@@ -17,4 +17,12 @@ public interface TensorBrowserListener {
 
     /** The user asked to load a tensor's ROI annotations as layers. */
     void roisRequested(String arrayId);
+
+    /**
+     * Progress of the panel's own resolve work, to show in a status line.
+     *
+     * @param text what is happening or happened (an outcome when {@code busy} is false)
+     * @param busy whether a resolve is still running
+     */
+    default void resolveStatus(String text, boolean busy) { }
 }

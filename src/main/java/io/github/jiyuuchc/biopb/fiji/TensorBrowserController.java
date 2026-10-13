@@ -105,6 +105,7 @@ public class TensorBrowserController implements TensorBrowserListener {
     private final ImageSource images;
     private final Set<String> inFlight = new HashSet<>();
     private int busy;
+    private boolean resolving; // the panel has a resolve running
 
     /** The real wiring. */
     public TensorBrowserController(Supplier<RefCountedConnection> connection, Ui ui) {
@@ -168,7 +169,7 @@ public class TensorBrowserController implements TensorBrowserListener {
                 && connId.equals(imp.getProperty(CONNECTION_PROPERTY));
     }
 
-    private void status(String text) { ui.status(text, busy > 0); }
+    private void status(String text) { ui.status(text, busy > 0 || resolving); }
 
     private void begin(String text) {
         busy++;
@@ -180,7 +181,7 @@ public class TensorBrowserController implements TensorBrowserListener {
     /** A request ended without a message of its own: stop the spinner and clear the "working" text. */
     private void finish() {
         end();
-        if (busy == 0) {
+        if (busy == 0 && !resolving) {
             ui.status(" ", false);
         }
     }
@@ -256,7 +257,7 @@ public class TensorBrowserController implements TensorBrowserListener {
                     ui.show(imp);
                     status("Opened " + what);
                 } catch (RuntimeException | Error e) {
-                    ui.status("Could not display " + what, busy > 0);
+                    ui.status("Could not display " + what, busy > 0 || resolving);
                     ui.error("Could not display " + arrayId, OpenFailure.describe(e));
                     owner.release();
                     try {
@@ -296,6 +297,12 @@ public class TensorBrowserController implements TensorBrowserListener {
             default:
                 ui.error("Could not open " + arrayId, f.message);
         }
+    }
+
+    @Override
+    public void resolveStatus(String text, boolean working) {
+        resolving = working;
+        status(text);
     }
 
     @Override

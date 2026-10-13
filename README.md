@@ -44,6 +44,20 @@ the server when you look at them.
    line reports how many loaded, how many were skipped and why, and whether the
    server's per-tensor cap truncated the set.
 
+### Cloud / unresolved sources
+
+A source the server has catalogued by URL only (a cloud or synced-folder placeholder, or one still
+being indexed) has no tensors listed yet. Its row carries a marker instead of a shape: a cloud
+glyph for a cloud file, `⋯` for one still being indexed, `[failed]` for one the server could not
+register. Opening it does nothing; **double-click** it or use **right-click > Resolve** (labelled
+*Load now* for a pending source and *Retry loading* for a failed one). Resolving a cloud file
+**downloads the whole file** (minutes, local disk, not offline), so it asks first; the other two
+do not. It runs in the background, shows the server's progress in the status line, and can be
+stopped with **Cancel resolve** (it takes effect at the next server heartbeat, and the server may
+finish the download anyway and cache it). When it ends, only that row is replaced, by the
+tensors found, and the status line says how many (or why it failed). Servers that do not report a
+reason treat every unresolved source as a cloud file, as the napari widget does.
+
 ### Assumptions
 
 - ROI coordinates are treated as pixel-index space of level 0 and are divided by the
