@@ -80,6 +80,25 @@ the server when you look at them.
    Selecting a tensor also shows its source id, array id, shape, dtype and dims (with Copy buttons)
    under the tree.
 
+### Label sets
+
+A label set (segmentation masks stored with an image) is an ordinary tensor addressed
+`<image array_id>/@labels/<name>`; as in the napari widget the path is the only thing that marks it. Sets are
+shown **under their image** in the tree, as a row led by a `◉` glyph and the set's name. An image that has sets
+still reads as one tensor (its shape stays on the source row, and double-click opens the image alone); "Open
+all" never opens a set implicitly.
+
+**Double-click** a set (or right-click > Open) to open it as a label image: a lazy virtual stack titled with the
+set's name, 8-bit when the set is uint8, 16-bit when uint16, else float32 (so ids wider than 16 bits are coerced,
+and lose exactness above 2^24). When the set matches its image (the image's axes in the image's order, the
+channel axis a singleton, any RGB samples axis left out) it takes the image's plane grid (a singleton axis is
+repeated, not re-read) and the image's calibration. Otherwise, or if the image cannot be described, it opens
+with its own axes and calibration and the reason is written to the Log window, as the napari widget logs and
+adds it at its own rank.
+
+ImageJ cannot overlay a lazily loaded stack without reading all of it, so there is **no "Open as overlay on current
+image"**: the set always opens as a separate image. Load ROIs does not apply to a set.
+
 ### Cloud / unresolved sources
 
 A source the server has catalogued by URL only (a cloud or synced-folder placeholder, or one still

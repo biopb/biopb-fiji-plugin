@@ -945,7 +945,9 @@ public class TensorBrowserPanel extends JPanel {
                     fireOpen(id, (Integer) spinner.getValue());
                 }
             }));
-            menu.add(item("Load ROIs", () -> fireRois(id)));
+            if (n.getKind() != TreeModelBuilder.Kind.LABEL) { // ROIs belong to the image, not its label sets
+                menu.add(item("Load ROIs", () -> fireRois(id)));
+            }
         } else {
             menu.add(item("Open all " + ids.size() + " tensors", () -> {
                 for (String id : new ArrayList<>(ids)) {

@@ -24,6 +24,11 @@ import java.util.List;
  * <p>Pixel types: uint8, uint16 and float32 open natively; all other numeric dtypes are converted to
  * float32 plane by plane (a deliberate choice: ImageJ has no other native types, and float keeps
  * signed/wide values representable). uint8 + sample axis of 3 opens as RGB.
+ *
+ * <p>A label set (an id {@link LabelId} recognises) opens the same way, as an integer-valued image
+ * titled with the set's name: uint8/uint16 ids stay 8/16-bit, every other dtype becomes float32 (ids
+ * above 16 bits are coerced, and lose precision above 2^24). When it is bound to its image
+ * ({@link LabelAlignment}) it takes the image's axes, plane grid and calibration.
  */
 public final class TensorOpener {
     /** Default per-plane pixel limit: 2^28 (16384 x 16384). ImageJ's hard limit is {@link Integer#MAX_VALUE}. */
@@ -135,7 +140,11 @@ public final class TensorOpener {
             shape = toArray(p.getShapeList());
         }
         // Roles are resolved once, on the level-0 shape, so singleton-ness never depends on the level.
-        AxisMap map = AxisMap.resolve(d.getDimLabelsList(), shape0, axisOverride);
+        // A label set (see LabelId) takes its image's axes when it is bound to it.
+        LabelOpener.Bound label = LabelId.isLabel(arrayId)
+                ? LabelOpener.bind(client, arrayId, d, axisOverride, IJ::log) : null;
+        AxisMap map = label != null ? label.alignment.labelMap
+                : AxisMap.resolve(d.getDimLabelsList(), shape0, axisOverride);
         PlaneSource.Kind kind = SdkPlaneSource.kindOf(d.getDtype(), map.s >= 0); // rejects bad dtypes now
         checkPlaneSize(shape, map, level, pyramid, maxPlanePixels, kind.bytesPerPixel());
 
@@ -145,10 +154,18 @@ public final class TensorOpener {
         @SuppressWarnings("unchecked")
         RandomAccessibleInterval<? extends RealType<?>> rai = (RandomAccessibleInterval<? extends RealType<?>>) tensor;
         PlaneSource src = new SdkPlaneSource(rai, map, d.getDtype());
+        if (label != null) {
+            src = label.gridded(src);
+        }
 
-        String title = level == 0 ? arrayId : arrayId + " [level " + level + "]";
+        String name = label != null ? label.name : arrayId;
+        String title = level == 0 ? name : name + " [level " + level + "]";
         ImagePlus imp = assemble(src, title);
-        applyCalibration(imp.getCalibration(), map, d.getPhysicalScaleList(), d.getPhysicalUnitList(), hint);
+        if (label != null) {
+            label.calibrate(imp.getCalibration(), d, hint);
+        } else {
+            applyCalibration(imp.getCalibration(), map, d.getPhysicalScaleList(), d.getPhysicalUnitList(), hint);
+        }
         imp.setProperty(LevelInfo.PROPERTY, new LevelInfo(arrayId, level, hint, method, map));
         return imp;
     }
@@ -239,7 +256,7 @@ public final class TensorOpener {
         return shape[map.x] * shape[map.y];
     }
 
-    private static long[] toArray(List<Long> l) {
+    static long[] toArray(List<Long> l) {
         long[] a = new long[l.size()];
         for (int i = 0; i < a.length; i++) a[i] = l.get(i);
         return a;

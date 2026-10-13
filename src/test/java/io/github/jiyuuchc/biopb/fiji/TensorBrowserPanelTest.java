@@ -301,6 +301,19 @@ public class TensorBrowserPanelTest {
         assertNotNull(panel.getConnection());
     }
 
+    @Test
+    public void aLabelSetRowOffersOpenButNotRois() throws Exception {
+        DefaultMutableTreeNode n = TreeModelBuilder.sourceNode(TreeModelBuilderTest.source("s1", "u",
+                TreeModelBuilderTest.tensor("s1/0", "uint8", 2),
+                TreeModelBuilderTest.tensor("s1/0/@labels/m", "uint8", 2)), "x");
+        edt(() -> {
+            javax.swing.JPopupMenu m = panel.menuFor(TreeModelBuilder.nodeOf(n.getChildAt(0)));
+            assertEquals(2, m.getComponentCount());
+            assertEquals("Open", ((javax.swing.JMenuItem) m.getComponent(0)).getText());
+            assertEquals(3, panel.menuFor(TreeModelBuilder.nodeOf(n)).getComponentCount());
+        });
+    }
+
     private int rootChildren() {
         return ((DefaultMutableTreeNode) panel.getTree().getModel().getRoot()).getChildCount();
     }
