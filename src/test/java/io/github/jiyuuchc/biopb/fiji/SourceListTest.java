@@ -503,7 +503,7 @@ public class SourceListTest {
     }
 
     @Test
-    public void resolveDoesNotMergeARowThatIsStillUnresolved() throws Exception {
+    public void resolveNeverMarksASourceResolvedFromAnUnresolvedRow() throws Exception {
         FakeClient client = new FakeClient();
         client.unresolved.add("a");
         SourceList list = listing(client, "a");
@@ -515,7 +515,7 @@ public class SourceListTest {
         Map<String, Object> row = list.resolve("a", null, null);
         assertEquals("failed", row.get("unresolved_reason"));
         assertFalse(SourceList.isResolved(list.getSources().get("a")));
-        assertEquals(null, list.getSources().get("a").get("unresolved_reason"));
+        assertEquals("failed", list.getSources().get("a").get("unresolved_reason")); // the held one was unresolved too
     }
 
     @Test
@@ -530,6 +530,52 @@ public class SourceListTest {
             return resolvedRow(id, true, "a/0");
         };
         list.resolve("a", null, null);
+        assertTrue(SourceList.isResolved(list.getSources().get("a")));
+    }
+
+    @Test
+    public void anUnresolvedEntryTakesACommittedRowWithANewReasonButAResolvedOneIsKept() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        client.unresolved.add("b");
+        SourceList list = listing(client, "a", "b");
+        client.resolver = (id, progress, cancel) -> {
+            Map<String, Object> row = resolvedRow(id, false, null);
+            row.put("unresolved_reason", "failed");
+            return row;
+        };
+        list.resolve("a", null, null);
+        assertEquals("failed", list.getSources().get("a").get("unresolved_reason")); // cloud -> failed shows
+        // a resolved entry is never replaced by an unresolved row
+        client.unresolved.clear();
+        list.refresh();
+        assertTrue(SourceList.isResolved(list.getSources().get("b")));
+        list.resolve("b", null, null);
+        assertTrue(SourceList.isResolved(list.getSources().get("b")));
+    }
+
+    @Test
+    public void aCommittedRowDrawsTheLazyFolderAfterCollapseAndReexpand() throws Exception {
+        FakeClient client = new FakeClient();
+        client.unresolved.add("a");
+        Map<String, CatalogClient.Level> served = levels("", level(l(), l("a")));
+        SourceList list = lazyListing(client, served);
+        list.refresh();
+        client.resolver = (id, progress, cancel) -> {
+            Map<String, Object> row = resolvedRow(id, false, null);
+            row.put("unresolved_reason", "failed");
+            return row;
+        };
+        list.resolve("a", null, null);
+        // levels reference sources by id: every rebuild draws the committed row
+        for (int i = 0; i < 2; i++) {
+            javax.swing.tree.DefaultMutableTreeNode n = TreeModelBuilder.levelChildren("", list.getLevels(),
+                    list.getSources(), new HashSet<String>(), new HashSet<String>()).get(0);
+            assertEquals("[failed]", TreeModelBuilder.nodeOf(n).getSuffix());
+        }
+        // a poll re-list is the server's view again, as in the napari widget
+        client.unresolved.clear();
+        list.refresh();
         assertTrue(SourceList.isResolved(list.getSources().get("a")));
     }
 

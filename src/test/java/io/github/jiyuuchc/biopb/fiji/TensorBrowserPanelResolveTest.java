@@ -39,6 +39,7 @@ public class TensorBrowserPanelResolveTest {
         final CountDownLatch started = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
         volatile String failWith;
+        volatile boolean replaced; // answer as a SourceList does when its connection was replaced
         volatile boolean sawCancel;
         volatile Map<String, Object> terminal; // the row to answer with instead of a resolved one
         final CountDownLatch exited = new CountDownLatch(1); // the resolver call has returned or thrown
@@ -90,6 +91,9 @@ public class TensorBrowserPanelResolveTest {
                 }
             } catch (InterruptedException e) {
                 throw new IOException(e);
+            }
+            if (replaced) {
+                throw new IllegalStateException("The connection changed");
             }
             if (failWith != null) {
                 throw new IOException(failWith);
@@ -269,14 +273,12 @@ public class TensorBrowserPanelResolveTest {
         String before = status();
         edt(panel::dispose);
         int heardAfterDispose = heard.size();
-        fake.failWith = "late failure";
-        fake.release.countDown();
-        assertTrue(fake.exited.await(10, TimeUnit.SECONDS));
+        assertTrue(fake.exited.await(10, TimeUnit.SECONDS)); // never released: only the cancel can end it
+        assertTrue("the resolver never saw dispose() set the cancel flag", fake.sawCancel);
         settle();
         assertEquals(before, status());
         assertEquals(heardAfterDispose, heard.size());
         assertTrue(errors.isEmpty());
-        assertTrue(fake.sawCancel || fake.resolveCalls.get() == 1);
     }
 
     @Test
@@ -304,6 +306,7 @@ public class TensorBrowserPanelResolveTest {
         edt(() -> panel.resolveSource("pending")); // the same one
         assertTrue(status(), status().startsWith("Already resolving 'pending.svs'"));
         assertEquals(1, fake.resolveCalls.get());
+        await(() -> status().contains("3s")); // the note gives way to the progress again
         edt(() -> panel.getCancelResolveButton().doClick()); // cancels that one
         await(() -> status().startsWith("Cancelled"));
         assertTrue(fake.sawCancel);
@@ -370,5 +373,46 @@ public class TensorBrowserPanelResolveTest {
         assertTrue(fake.started.await(10, TimeUnit.SECONDS));
         assertEquals(1, fake.resolveCalls.get());
         assertTrue(asked.isEmpty()); // pending: no download, no question
+    }
+
+    @Test
+    public void resolvingLeavesTheUsersSelectionAlone() throws Exception {
+        edt(() -> panel.getTree().setSelectionPath(new TreePath(child("failed.svs").getPath())));
+        edt(() -> panel.resolveSource("cloud"));
+        fake.release.countDown();
+        await(() -> status().startsWith("Resolved"));
+        edt(() -> assertEquals("failed.svs",
+                TreeModelBuilder.nodeOf(panel.getTree().getLastSelectedPathComponent()).getText()));
+    }
+
+    @Test
+    public void aResolvedRowKeepsItsSelectionWhenItWasSelected() throws Exception {
+        edt(() -> panel.getTree().setSelectionPath(new TreePath(child("cloud.svs").getPath())));
+        edt(() -> panel.resolveSource("cloud"));
+        fake.release.countDown();
+        await(() -> status().startsWith("Resolved"));
+        edt(() -> assertEquals("cloud.svs",
+                TreeModelBuilder.nodeOf(panel.getTree().getLastSelectedPathComponent()).getText()));
+    }
+
+    @Test
+    public void aChangedReasonIsHeldSoTheMenuAgrees() throws Exception {
+        fake.terminal = Fake.row("cloud", "/x/cloud.svs", "failed");
+        edt(() -> panel.resolveSource("cloud"));
+        fake.release.countDown();
+        await(() -> status().startsWith("Resolve failed"));
+        assertEquals("failed", panel.getSourceListForTest().getSources().get("cloud").get("unresolved_reason"));
+        edt(() -> assertEquals("Retry loading", ((JMenuItem) panel.menuFor(
+                TreeModelBuilder.nodeOf(child("cloud.svs"))).getComponent(0)).getText()));
+    }
+
+    @Test
+    public void aStaleConnectionAnswerIsDroppedWithoutADialog() throws Exception {
+        fake.replaced = true;
+        edt(() -> panel.resolveSource("pending"));
+        fake.release.countDown();
+        await(() -> status().equals(" ") && !panel.getCancelResolveButton().isVisible());
+        assertTrue(errors.isEmpty());
+        assertEquals(" |false", heard.get(heard.size() - 1));
     }
 }

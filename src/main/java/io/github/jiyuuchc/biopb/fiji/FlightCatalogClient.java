@@ -102,7 +102,7 @@ public final class FlightCatalogClient implements CatalogClient {
                         : p -> onProgress.accept(new ResolveProgress(p.getElapsedSeconds(), p.getTargetName(),
                                 p.getTargetBytes())),
                 shouldCancel)) {
-            List<Map<String, Object>> rows = rows(root);
+            List<Map<String, Object>> rows = root == null ? Collections.<Map<String, Object>>emptyList() : rows(root);
             if (rows.isEmpty()) {
                 throw new IOException("resolve of '" + sourceId + "' returned no catalog row");
             }

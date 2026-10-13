@@ -58,6 +58,9 @@ import javax.swing.tree.TreeSelectionModel;
  * rebuilding the rest. A full rebuild (the watcher re-listing, a search cleared)
  * keeps what is open, the selection and the scroll. Search is server-side only.
  *
+ * <p>One resolve runs at a time. Replacing the connection or disposing the panel asks it to stop and
+ * forgets it (its worker is detached, not joined, and its outcome is dropped).
+ *
  * <p>Threading: all state lives on the event dispatch thread. Every server call
  * (connect, read a folder, search) runs on a {@link SwingWorker}; the
  * {@link SourceList} change callback, which arrives on its watcher thread, is
@@ -188,6 +191,12 @@ public class TensorBrowserPanel extends JPanel {
     private volatile Set<String> openSnapshot = Collections.emptySet(); // read by SourceList's threads
     private String resolvingId; // the one running resolve (they are serialized, as napari's modal flow is) ...
     private AtomicBoolean resolveCancel; // ... and the flag that asks it to stop
+    private String progressText = " "; // what the status line shows for it
+    private final Timer noteTimer = new Timer(2500, e -> {
+        if (resolvingId != null) {
+            status.setText(progressText);
+        }
+    });
     private final JButton cancelResolve = new JButton("Cancel resolve");
     /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
     BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
@@ -800,7 +809,10 @@ public class TensorBrowserPanel extends JPanel {
         }
         String name = nameOf(l, sourceId);
         if (resolvingId != null) {
-            say("Already resolving '" + (resolvingId.equals(sourceId) ? name : nameOf(l, resolvingId)) + "'");
+            // A transient note over the progress line: not sent to the listeners, and put back after a moment.
+            status.setText("Already resolving '" + (resolvingId.equals(sourceId) ? name : nameOf(l, resolvingId)) + "'");
+            noteTimer.setRepeats(false);
+            noteTimer.restart();
             return;
         }
         if (TreeModelBuilder.unresolvedState(currentRow(l, sourceId)) == TreeModelBuilder.Unresolved.CLOUD
@@ -860,7 +872,9 @@ public class TensorBrowserPanel extends JPanel {
                     }
                 } catch (ExecutionException e) {
                     Throwable why = e.getCause() == null ? e : e.getCause();
-                    if (why instanceof ResolveCancelledException) {
+                    if (why instanceof IllegalStateException) { // the connection was replaced under us: drop quietly
+                        say(" ");
+                    } else if (why instanceof ResolveCancelledException) {
                         say("Cancelled resolving '" + name + "'");
                     } else {
                         LOG.log(Level.FINE, "Resolve failed", why);
@@ -910,6 +924,10 @@ public class TensorBrowserPanel extends JPanel {
     /** Shows {@code text} in the status line and tells the listeners, busy while a resolve runs. */
     private void say(String text) {
         status.setText(text);
+        if (resolvingId != null) {
+            progressText = text;
+        }
+        noteTimer.stop();
         for (TensorBrowserListener l : listeners) {
             l.resolveStatus(text, resolvingId != null);
         }
@@ -929,6 +947,7 @@ public class TensorBrowserPanel extends JPanel {
             return;
         }
         resolveCancel.set(true);
+        noteTimer.stop();
         resolveCancel = null;
         resolvingId = null;
         cancelResolve.setVisible(false);
@@ -969,9 +988,8 @@ public class TensorBrowserPanel extends JPanel {
                     openSources.add(sourceId); // show what the resolve found
                     restoreExpansion(fresh);
                 }
-                selectedId = TreeModelBuilder.nodeOf(fresh).getId();
-                restoreSelection(false);
             }
+            restoreSelection(false); // the user's selection stays; the row keeps its id, so a selected one stays selected
         } finally {
             rebuilding = false;
         }

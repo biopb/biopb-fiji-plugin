@@ -356,7 +356,8 @@ public final class SourceList implements AutoCloseable {
     /**
      * Resolves a source (a cloud one is downloaded, which can take minutes: call off the UI thread)
      * and re-lists. The row the resolve committed is merged into {@link #getSources()} if it is
-     * resolved and the held entry is not, so a re-list that still shows the source unresolved (a
+     * resolved and the held entry is not (or replaced while the held entry is itself still unresolved,
+     * so a new reason, say cloud to failed, shows), so a re-list that still shows the source unresolved (a
      * pending source registers without moving the count) cannot undo it. A failing re-list is
      * ignored: the resolve itself succeeded.
      *
@@ -389,7 +390,9 @@ public final class SourceList implements AutoCloseable {
             Object id = row.get("source_id");
             String key = id instanceof String ? (String) id : sourceId;
             Map<String, Object> held = sources.get(key);
-            if (isResolved(row) && (held == null || !isResolved(held))) {
+            // A resolved entry is never replaced; an unresolved one takes the committed row, resolved or not
+            // (cloud -> failed must show). A missing entry takes it only if resolved, as the napari widget does.
+            if (held == null ? isResolved(row) : !isResolved(held)) {
                 Map<String, Map<String, Object>> all = new HashMap<>(sources);
                 all.put(key, committed);
                 sources = Collections.unmodifiableMap(all);
