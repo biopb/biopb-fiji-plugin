@@ -105,6 +105,27 @@ one holds for all. To accept a legitimately rotated certificate, delete that `ho
 (or the file) and connect again; a pin-mismatch message that you did not expect may be a
 man-in-the-middle, so check before you do.
 
+### Settings file
+
+`Settings` reads `napari-widget.json` in biopb's config directory, `$BIOPB_CONFIG_HOME/biopb` (an
+absolute path; default `~/.config/biopb` on every platform; `XDG_CONFIG_HOME` is not read). It is
+the **same file with the same keys as the napari widget**, so the two clients agree. It is a JSON
+object of sections; only the keys you changed need to be present, and a missing or wrong-typed value
+reads as its default:
+
+| key | default |
+| --- | --- |
+| `widget.server_url`, `widget.is_3d` | `"localhost:50051"`, `false` |
+| `timeout.health_check`, `timeout.get_op_names`, `timeout.process_image` | `5.0`, `10.0`, `300` (seconds) |
+| `grpc.max_message_size_mb`, `grpc.max_concurrent_calls` | `512`, `4` |
+| `memory.warn_threshold_mb`, `memory.error_threshold_mb` | `500`, `2000` |
+
+These are the napari ProcessImage widgets' settings; **the Tensor Browser does not read any of them
+yet** (its address comes from the Connect field / `BIOPB_TENSOR_URL`, its limits are the constants
+above). The class is there so the file contract is shared and typed getters exist for features that
+need them. Saving rewrites only the keys the plugin set and keeps every other key in the file (including
+napari-only ones), via a temporary file renamed into place (through a symlink to the real file, keeping its permissions; if the existing file cannot be read the save is skipped). A running instance notices the file changing. The lock is in-process only: with Fiji and napari writing at the same moment, the last writer wins. Without a usable home directory (and no `BIOPB_CONFIG_HOME`) nothing is persisted.
+
 ### Assumptions
 
 - ROI coordinates are treated as pixel-index space of level 0 and are divided by the
