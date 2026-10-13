@@ -36,6 +36,8 @@ public final class TreeModelBuilder {
     public static final String CLOUD_GLYPH = "\u2601";
     /** Shown on a source the server is still indexing. */
     public static final String PENDING_GLYPH = "\u22ef";
+    /** Marks a label-set row (a filled ring: the row already carries the set's name and shape). */
+    public static final String LABEL_GLYPH = "\u25c9";
     private static final String CLOUD_NOTE = "Cloud file, not downloaded. Resolving it downloads the whole file.";
     private static final String PENDING_NOTE = "Being indexed in the background.";
 
@@ -45,7 +47,7 @@ public final class TreeModelBuilder {
     private TreeModelBuilder() { }
 
     /** What a tree row is. */
-    public enum Kind { FOLDER, SOURCE, TENSOR, NOTE }
+    public enum Kind { FOLDER, SOURCE, TENSOR, LABEL, NOTE }
 
     /**
      * Why a source is unresolved, as the server's {@code unresolved_reason} says. {@code CLOUD}
@@ -226,26 +228,50 @@ public final class TreeModelBuilder {
             return node(Kind.SOURCE, id, name, state == Unresolved.FAILED ? "[failed]" : glyph, tip,
                     Collections.<String>emptyList(), state);
         }
-        if (tensors.size() == 1) {
-            Map<?, ?> t = tensors.get(0);
-            String array = String.valueOf(t.get("array_id"));
-            return node(Kind.SOURCE, id, name, withGlyph(glyph, tensorSuffix(t)), tip, Collections.singletonList(array),
-                    state);
+        // Label sets ride under their image rather than counting as tensors of the source.
+        LabelId.Grouping grouping = LabelId.group(tensors);
+        List<LabelId.Group> groups = grouping.images;
+        List<String> all = new ArrayList<>(); // the images only: "open all" never lays a mask implicitly
+        for (LabelId.Group g : groups) {
+            all.add(String.valueOf(g.image.get("array_id")));
         }
-        List<String> all = new ArrayList<>();
-        for (Map<?, ?> t : tensors) {
-            all.add(String.valueOf(t.get("array_id")));
+        DefaultMutableTreeNode n;
+        if (groups.size() == 1) {
+            n = node(Kind.SOURCE, id, name, withGlyph(glyph, tensorSuffix(groups.get(0).image)), tip, all, state);
+            addLabelRows(n, groups.get(0).labelSets, id);
+        } else {
+            String count = groups.isEmpty() ? "" : groups.size() + " tensors";
+            n = node(Kind.SOURCE, id, name, withGlyph(glyph, count), tip, all, state);
+            for (LabelId.Group g : groups) {
+                String array = String.valueOf(g.image.get("array_id"));
+                DefaultMutableTreeNode row = node(Kind.TENSOR, array, shortName(array), tensorSuffix(g.image), array,
+                        Collections.singletonList(array));
+                nodeOf(row).sourceId = id;
+                addLabelRows(row, g.labelSets, id);
+                n.add(row);
+            }
         }
-        DefaultMutableTreeNode n = node(Kind.SOURCE, id, name, withGlyph(glyph, tensors.size() + " tensors"), tip, all,
-                state);
-        for (Map<?, ?> t : tensors) {
-            String array = String.valueOf(t.get("array_id"));
-            DefaultMutableTreeNode tn = node(Kind.TENSOR, array, shortName(array), tensorSuffix(t), array,
-                    Collections.singletonList(array));
-            nodeOf(tn).sourceId = id;
-            n.add(tn);
-        }
+        addLabelRows(n, grouping.orphans, id); // not under any image, and not counted above
         return n;
+    }
+
+    /** One LABEL row per set, under {@code parent}. */
+    private static void addLabelRows(DefaultMutableTreeNode parent, List<Map<?, ?>> sets, String sourceId) {
+        for (Map<?, ?> t : sets) {
+            String array = String.valueOf(t.get("array_id"));
+            LabelId.Address a = LabelId.parse(array);
+            // The set's own name (and native level, which makes it a different tensor), not the last segment.
+            String setName = a == null ? shortName(array) : LabelOpener.displayName(a);
+            DefaultMutableTreeNode row = node(Kind.LABEL, array, LABEL_GLYPH + " " + setName, tensorSuffix(t),
+                    "Label set \u201c" + setName + "\u201d \u2013 opens as a separate label image", Collections.singletonList(array));
+            nodeOf(row).sourceId = sourceId;
+            parent.add(row);
+        }
+    }
+
+    /** How many image tensors (label sets not counted) the source row lists. */
+    public static int imageCount(Map<String, Object> descriptor) {
+        return LabelId.group(tensors(descriptor)).images.size();
     }
 
     private static String withGlyph(String glyph, String suffix) {

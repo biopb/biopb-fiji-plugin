@@ -312,6 +312,20 @@ public class TensorBrowserControllerTest {
     }
 
     @Test
+    public void roisForALabelSetAreRefusedOnEveryPath() throws Exception {
+        images.all.add(image("s/0/@labels/m", 0, "c"));
+        fetcher = (c, id, i, info) -> { throw new IOException("must not be asked"); };
+        TensorBrowserController c = controller(null);
+        edt(() -> c.roisRequested("s/0/@labels/m"));
+        assertFalse(log.stream().anyMatch(l -> l.startsWith("error:"))); // a status note, no modal
+        assertTrue(log.stream().anyMatch(l -> l.startsWith("status:ROIs belong to the image")));
+        assertEquals(TensorBrowserController.roisRefusal("s/0/@labels/m"),
+                log.stream().filter(l -> l.startsWith("status:")).findFirst().get().substring(7));
+        assertEquals(null, TensorBrowserController.roisRefusal("s/0"));
+        assertEquals(1, conn.refCount());
+    }
+
+    @Test
     public void pickPrefersCurrentThenFinestLevel() {
         ImagePlus a1 = image("a", 1, "c"), a0 = image("a", 0, "c"), a2 = image("a", 2, "c"), b = image("b", 0, "c");
         assertSame(a2, TensorBrowserController.pick(a2, Arrays.asList(b, a1, a0, a2), "a", "c"));
