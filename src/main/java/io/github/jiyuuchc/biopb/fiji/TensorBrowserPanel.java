@@ -295,6 +295,14 @@ public class TensorBrowserPanel extends JPanel {
     // it, but that may not unblock a Flight call: a hung one can keep its thread until the call times out.
     private final java.util.concurrent.ThreadPoolExecutor metadataReads = newMetadataPool();
     private final Set<MetadataDialog> metadataDialogs = new HashSet<>(); // open, non-modal; closed with the connection
+    private final SourceEditor editor = new SourceEditor(new SourceEditor.Host() {
+        @Override public SourceList list() { return list; }
+        @Override public String url() { return connection == null ? null : connection.url(); }
+        @Override public boolean connecting() { return !disposed && !connectButton.isEnabled(); }
+        @Override public Component parent() { return TensorBrowserPanel.this; }
+        @Override public void status(String text) { status.setText(text); }
+        @Override public void catalogChanged() { onCatalogChanged(); }
+    });
     /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
     BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
             title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE) == JOptionPane.OK_OPTION;
@@ -342,6 +350,8 @@ public class TensorBrowserPanel extends JPanel {
         JPanel top = new JPanel(new BorderLayout(0, 2));
         top.add(bar, BorderLayout.NORTH);
         top.add(status, BorderLayout.CENTER);
+        top.add(editor.view(), BorderLayout.SOUTH);
+        editor.acceptDropsOn(this, tree, scroll, scroll.getViewport());
         search.setToolTipText("Search sources by id, URL or type (on the server)");
         JPanel south = new JPanel(new BorderLayout(0, 2));
         south.add(search, BorderLayout.NORTH);
@@ -444,6 +454,7 @@ public class TensorBrowserPanel extends JPanel {
         connectButton.setEnabled(false);
         address.setEnabled(false);
         token.setEnabled(false);
+        editor.updateHint();
         status.setText("Connecting to " + target + "…");
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
@@ -464,6 +475,7 @@ public class TensorBrowserPanel extends JPanel {
                     connectButton.setEnabled(true);
                     address.setEnabled(true);
                     syncToken.run();
+                    editor.updateHint();
                 }
                 Object[] r;
                 try {
@@ -527,6 +539,7 @@ public class TensorBrowserPanel extends JPanel {
         closeMetadataDialogs();
         metadataReads.shutdownNow();
         forgetResolve();
+        editor.connectionChanged();
         connectGen++;
         searchGen++;
         inFlight = false;
@@ -581,6 +594,7 @@ public class TensorBrowserPanel extends JPanel {
         connection = c;
         connectionName = name;
         list = l;
+        editor.connectionChanged();
         searchGen++;
         searchResult = null;
         searchQuery = "";
@@ -917,9 +931,44 @@ public class TensorBrowserPanel extends JPanel {
         }
         tree.setSelectionPath(path);
         JPopupMenu menu = menuFor(n);
+        String removeRoot = removeRootOf(path);
+        if (removeRoot != null) {
+            if (menu == null) {
+                menu = new JPopupMenu();
+            } else {
+                menu.addSeparator();
+            }
+            menu.add(item("Remove source\u2026", () -> editor.remove(removeRoot, n.getText())));
+        }
         if (menu != null) {
             menu.show(tree, e.getX(), e.getY());
         }
+    }
+
+    /**
+     * The {@code dnd://} root a top-level row can be removed by, or {@code null}: only what was added
+     * by drop or with the Add button has one, and only at the top of the tree.
+     */
+    String removeRootOf(TreePath path) {
+        SourceList l = list;
+        if (l == null || path.getPathCount() != 2) { // the root, then a top-level row
+            return null;
+        }
+        TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(path.getLastPathComponent());
+        if (n == null) {
+            return null;
+        }
+        if (n.getKind() == TreeModelBuilder.Kind.FOLDER) {
+            Set<String> roots = new HashSet<>(l.getDroppedRoots());
+            roots.addAll(DroppedSources.rootsOf(l.getSources().values()));
+            return DroppedSources.removeRootForFolder(n.getKey(), roots);
+        }
+        if (n.getKind() == TreeModelBuilder.Kind.SOURCE) {
+            Map<String, Object> d = l.getSources().get(n.getKey());
+            Object url = d == null ? null : d.get("source_url");
+            return url instanceof String ? DroppedSources.removeRootForSource((String) url) : null;
+        }
+        return null;
     }
 
     /** The context menu of a row, or {@code null} for a row that opens nothing. */
@@ -1357,6 +1406,7 @@ public class TensorBrowserPanel extends JPanel {
     JLabel getStatusLabel() { return status; }
     JLabel getSearchStatusLabel() { return searchStatus; }
     JButton getConnectButton() { return connectButton; }
+    SourceEditor getEditorForTest() { return editor; }
     JButton getCancelResolveButton() { return cancelResolve; }
     SourceList getSourceListForTest() { return list; }
 }

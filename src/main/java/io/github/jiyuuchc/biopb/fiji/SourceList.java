@@ -5,10 +5,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -52,6 +54,10 @@ public final class SourceList implements AutoCloseable {
     /** Source ids per descriptor query, so no statement grows without bound. */
     static final int DESCRIBE_CHUNK = 500;
 
+    /** The top-level {@code dnd://} names: what drag-and-drop (or the Add action) registered, so what can be removed. */
+    static final String DND_ROOTS_SQL = "SELECT DISTINCT regexp_extract(source_url, '^dnd://[^\\\\/]+') AS root "
+            + "FROM sources WHERE source_url LIKE 'dnd://%'";
+
     /** The columns a source row is decoded from, when the client names none. */
     public static final String BASE_COLUMNS = "source_id, source_url, source_type, is_resolved, tensors";
 
@@ -71,6 +77,7 @@ public final class SourceList implements AutoCloseable {
     private volatile Map<String, Map<String, Object>> sources = Collections.emptyMap();
     private volatile Map<String, CatalogClient.Level> levels = Collections.emptyMap();
     private volatile boolean lazy;
+    private volatile Set<String> droppedRoots = Collections.emptySet();
     private boolean lazyUnsupported;
 
     private volatile Supplier<? extends Collection<String>> openKeys = Collections::emptySet;
@@ -156,6 +163,7 @@ public final class SourceList implements AutoCloseable {
             sources = Collections.emptyMap();
             levels = Collections.emptyMap();
             lazy = false;
+            droppedRoots = Collections.emptySet();
             lazyUnsupported = false;
             lastCount = null;
             lastGeneration = null;
@@ -183,6 +191,7 @@ public final class SourceList implements AutoCloseable {
             before = levels;
         }
         if (tryLevels && refreshLevels(client, startEpoch, before)) {
+            refreshDroppedRoots(client, startEpoch);
             return sources;
         }
         Map<String, Map<String, Object>> listed = indexById(client.query(sourcesSql(sourceColumns(client))));
@@ -194,6 +203,35 @@ public final class SourceList implements AutoCloseable {
             sources = listed;
         }
         return listed;
+    }
+
+    /**
+     * Reads which top-level names were made by drag-and-drop ({@code dnd://name} roots), as the napari
+     * widget does. A server that will not say leaves the last answer: the tree then has no remove action
+     * on a folder (a source row is recognised by its own URL).
+     */
+    private void refreshDroppedRoots(CatalogClient client, int startEpoch) {
+        try {
+            Set<String> roots = new HashSet<>();
+            for (Map<String, Object> row : client.query(DND_ROOTS_SQL)) {
+                if (row.get("root") instanceof String && !((String) row.get("root")).isEmpty()) {
+                    roots.add((String) row.get("root"));
+                }
+            }
+            CatalogClient now = connection.get();
+            synchronized (lock) {
+                if (startEpoch == epoch && now == client) {
+                    droppedRoots = Collections.unmodifiableSet(roots);
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.FINE, "Reading the dropped roots failed", e);
+        }
+    }
+
+    /** The {@code dnd://} roots the server holds, as of the last re-list (lazy listing only). */
+    public Set<String> getDroppedRoots() {
+        return droppedRoots;
     }
 
     /** Reads the levels; false when the server (or SDK) cannot serve them. */
@@ -399,6 +437,52 @@ public final class SourceList implements AutoCloseable {
             }
         }
         return committed;
+    }
+
+    // --- adding and removing -------------------------------------------------
+
+    /**
+     * Registers a local path on the server and re-lists, so the new sources show. The server walks a
+     * folder, which takes as long as it takes: call off the UI thread. A re-list that fails after the
+     * add went through is logged, not thrown (the add happened; the watcher catches up).
+     *
+     * @param onProgress receives progress on the calling thread, or {@code null}
+     * @param shouldCancel polled as progress arrives; true stops the walk, or {@code null}
+     * @throws IllegalStateException if not connected, or the connection changed meanwhile
+     * @throws IOException if the call fails
+     */
+    public SourceChanges.AddResult add(String path, boolean cloud, Consumer<SourceChanges.AddProgress> onProgress,
+            BooleanSupplier shouldCancel) throws IOException {
+        CatalogClient client = client();
+        int startEpoch = currentEpoch();
+        SourceChanges.AddResult result = client.registerLocalPath(path, cloud, onProgress, shouldCancel);
+        afterChange(client, startEpoch, "adding '" + path + "'");
+        return result;
+    }
+
+    /**
+     * Unregisters the sources under a {@code dnd://} root and re-lists.
+     *
+     * @throws IllegalStateException if not connected, or the connection changed meanwhile
+     * @throws IOException if the call fails
+     */
+    public SourceChanges.RemoveResult remove(String rootUrl) throws IOException {
+        CatalogClient client = client();
+        int startEpoch = currentEpoch();
+        SourceChanges.RemoveResult result = client.deregisterLocalPath(rootUrl);
+        afterChange(client, startEpoch, "removing '" + rootUrl + "'");
+        return result;
+    }
+
+    private void afterChange(CatalogClient client, int startEpoch, String what) {
+        synchronized (lock) { // a replaced connection must not be re-listed into
+            checkCurrent(client, startEpoch, connection.get());
+        }
+        try {
+            refresh();
+        } catch (IOException | RuntimeException e) {
+            LOG.log(Level.FINE, "Re-list after " + what + " failed", e);
+        }
     }
 
     // --- SQL -----------------------------------------------------------------
