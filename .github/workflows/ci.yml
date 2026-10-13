@@ -5,9 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
@@ -20,3 +24,67 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
       - name: Build and test
         run: xvfb-run -a mvn -B verify
+
+  # Installs the built plugin into a real Fiji Latest and checks it loads headless.
+  fiji-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FIJI_URL: https://downloads.imagej.net/fiji/latest/fiji-latest-linux64-jdk.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+          cache: maven
+      # Key the cache on the zip's Last-Modified so a new Fiji build is picked up. If the
+      # header is unavailable the key falls back to the ISO week (and says so).
+      - name: Fiji Latest version stamp
+        id: stamp
+        run: |
+          set -eo pipefail
+          # A failing HEAD request fails the job; only a missing header falls back.
+          headers=$(curl -fsSIL "$FIJI_URL" | tr -d '\r')
+          lm=$(echo "$headers" | awk -F': ' 'tolower($1)=="last-modified"{v=$2} END{print v}')
+          if [ -n "$lm" ]; then
+            echo "Fiji Last-Modified: $lm"
+            key=$(echo "$lm" | tr -c 'A-Za-z0-9\n' '-')
+          else
+            key="unknown-week-$(date +%G-%V)"
+            echo "::warning::No Last-Modified header for $FIJI_URL; caching Fiji by ISO week ($key)"
+          fi
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Cache Fiji
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: fiji-download
+          key: fiji-latest-linux64-jdk-${{ steps.stamp.outputs.key }}
+      - name: Download Fiji
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p fiji-download
+          curl -fsSL -o fiji-download/fiji.zip "$FIJI_URL"
+      - name: Unpack Fiji
+        run: |
+          mkdir fiji-unpacked
+          unzip -q fiji-download/fiji.zip -d fiji-unpacked
+          launcher=$(find fiji-unpacked -maxdepth 3 -name fiji-linux-x64 -type f | head -n 1)
+          if [ -z "$launcher" ]; then
+            echo "::error::fiji-linux-x64 not found in the Fiji download; layout changed?"
+            find fiji-unpacked -maxdepth 2
+            exit 1
+          fi
+          mv "$(dirname "$launcher")" ./Fiji.app
+          chmod +x ./Fiji.app/fiji-linux-x64
+      # Copies the plugin jar and the dependencies Fiji lacks into the install.
+      - name: Install plugin into Fiji
+        run: mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+      - name: Smoke test (headless)
+        run: ./Fiji.app/fiji-linux-x64 --headless --run .github/scripts/smoke.groovy
+      # Builds the real window in Fiji's GUI on a virtual display.
+      - name: Smoke test (GUI, xvfb)
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+          xvfb-run -a ./Fiji.app/fiji-linux-x64 --run .github/scripts/smoke-gui.groovy
