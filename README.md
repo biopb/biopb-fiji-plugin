@@ -50,12 +50,15 @@ the server when you look at them.
 1. *Plugins > BioPB > Tensor Browser* opens the browser window (running it again
    brings the same window to the front). Closing the window does not affect images
    already opened from it: the server connection stays open until the last of those
-   images is closed, and then closes.
+   images is closed, and then closes. The window remembers its size and position (default 560x720,
+   minimum 400x460); the search field sits above the tree.
 2. Enter the server and press **Connect**: `host[:port]` (plaintext; default
    `localhost:8815`, or the `BIOPB_TENSOR_URL` environment variable), `grpc://host:port` (`grpc+tcp://` too), or
    `grpc+tls://host:port` (`grpcs://` also works) for TLS. Leave the address **empty** to
    discover the server the way the Python clients do (`BIOPB_TENSOR_URL`, then the local
-   biopb control plane). The status line says whether the connection is plaintext or TLS;
+   biopb control plane). The status line is one line with a coloured dot (grey not connected, amber
+   connecting, green connected, red error) and a short text (`Connected - local`); hover it for the address and
+   whether the connection is plaintext or TLS;
    a failure is shown there and in a dialog, with what to do about it (token rejected, certificate
    changed, ...). The **Token** field (default `BIOPB_TENSOR_TOKEN`) is sent only to the address typed in
    the field; it is never logged or shown. It is refused over plaintext to a non-local host (use `grpc+tls://`;

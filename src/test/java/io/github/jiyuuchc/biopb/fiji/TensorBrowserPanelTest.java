@@ -168,7 +168,7 @@ public class TensorBrowserPanelTest {
     @Test
     public void connectBuildsTheTopLevelOffTheEdtAndExpandingGraftsTheFolder() throws Exception {
         connect();
-        assertTrue(panel.getStatusLabel().getText(), panel.getStatusLabel().getText().startsWith("Connected"));
+        assertTrue(panel.getConnectionLabel().getText(), panel.getConnectionLabel().getText().startsWith("Connected"));
         assertEquals(TreeModelBuilder.LOADING_NOTE, TreeModelBuilder.nodeOf(child("a").getChildAt(0)).getText());
         edt(() -> panel.getTree().expandPath(new TreePath(child("a").getPath())));
         await(() -> TreeModelBuilder.nodeOf(child("a").getChildAt(0)).getKind() == TreeModelBuilder.Kind.SOURCE);
@@ -236,7 +236,7 @@ public class TensorBrowserPanelTest {
         connect();
         edt(panel::connect);
         await(() -> opened.size() == 2 && panel.getConnection() != null
-                && panel.getStatusLabel().getText().startsWith("Connected"));
+                && panel.getConnectionLabel().getText().startsWith("Connected"));
         await(() -> fake.closed.get() == 1);
         assertEquals(0, second.closed.get());
         edt(panel::dispose);
