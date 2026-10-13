@@ -1,5 +1,8 @@
 package io.github.jiyuuchc.biopb.fiji;
 
+import biopb.tensor.AddSourceFailure;
+import biopb.tensor.AddSourceResult;
+import biopb.tensor.RemoveSourceResult;
 import biopb.tensor.TensorFlightClient;
 import biopb.tensor.TensorFlightClient.CatalogChildren;
 import java.io.IOException;
@@ -151,5 +154,30 @@ public final class FlightCatalogClient implements CatalogClient {
     @Override
     public String sourceRowColumns() {
         return client.sourceRowColumns();
+    }
+
+    @Override
+    public SourceChanges.AddResult registerLocalPath(String path, boolean cloud,
+            Consumer<SourceChanges.AddProgress> onProgress, BooleanSupplier shouldCancel) throws IOException {
+        AddSourceResult r = client.registerLocalPath(path, "", cloud,
+                onProgress == null ? null
+                        : p -> onProgress.accept(new SourceChanges.AddProgress(p.getAddedCount(), p.getCurrentPath())),
+                shouldCancel);
+        return new SourceChanges.AddResult(r.getAddedList(), r.getRefreshedList(), r.getRemovedList(),
+                failures(r.getFailedList()), r.getSkippedOffline(), r.getSkippedCloudDirs());
+    }
+
+    @Override
+    public SourceChanges.RemoveResult deregisterLocalPath(String rootUrl) throws IOException {
+        RemoveSourceResult r = client.deregisterLocalPath(rootUrl);
+        return new SourceChanges.RemoveResult(r.getRemovedList(), failures(r.getFailedList()));
+    }
+
+    private static List<SourceChanges.Failure> failures(List<AddSourceFailure> in) {
+        List<SourceChanges.Failure> out = new ArrayList<>();
+        for (AddSourceFailure f : in) {
+            out.add(new SourceChanges.Failure(f.getPath(), f.getReason()));
+        }
+        return out;
     }
 }

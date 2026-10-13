@@ -60,6 +60,9 @@ public class TensorBrowserPanelTest {
 
         @Override
         public List<Map<String, Object>> query(String sql) throws IOException {
+            if (sql.contains("dnd://")) {
+                return new ArrayList<>(); // the dropped-roots read after a re-list is not what these tests count
+            }
             threads.add(Thread.currentThread().getName());
             queries.add(sql);
             CountDownLatch g = queryGate;

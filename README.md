@@ -101,6 +101,26 @@ adds it at its own rank.
 ImageJ cannot overlay a lazily loaded stack without reading all of it, so there is **no "Open as overlay on current
 image"**: the set always opens as a separate image. Load ROIs does not apply to a set (it is refused).
 
+### Adding and removing sources
+
+Against a server **on this machine** (`localhost`, `127.*`, `::1`) you can add data to the catalog:
+**drag a file or folder** onto the browser, or press **Add folder/file…**. The server then
+discovers and catalogs what is under it. The line beside the button says when adding is
+unavailable and why (not connected, or a remote server: a path is only meaningful to a server that
+shares your disk). "Local" means a loopback address, so a remote server reached through an SSH tunnel
+to `localhost` is treated as local too. One item per drop; a multi-selection is refused.
+
+- A folder with more than 2000 entries asks first (a guard against dropping a home folder).
+- A path inside **OneDrive** warns that cloud-synced sources are experimental, and if you go ahead the
+  offline placeholder files are registered too (opening one downloads it). If the server left offline files
+  or OneDrive folders out of an add, a dialog says how many; to include them, remove the folder and add it again.
+- The add runs in the background and shows the number of sources registered; **Cancel add** stops it
+  (sources already registered stay). One add runs at a time.
+- Failures are listed in a dialog and the status line summarises (`Add data: added 3, 1 failed`).
+
+**Right-click > Remove source…** on a top-level row that was added this way unregisters it from the
+server (after asking); the files on disk are not touched. One removal runs at a time.
+
 ### Cloud / unresolved sources
 
 A source the server has catalogued by URL only (a cloud or synced-folder placeholder, or one still

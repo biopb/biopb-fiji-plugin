@@ -142,4 +142,29 @@ public interface CatalogClient {
     default Map<String, Object> getSourceMetadata(String sourceId) throws IOException {
         throw new UnsupportedOperationException("source metadata is not supported by this client");
     }
+
+    /**
+     * Registers a local file or folder as a source (the server discovers and catalogs what is under
+     * it, which for a folder is a slow walk). Blocking: call off the UI thread.
+     *
+     * @param cloud also register offline placeholder files (opening one downloads it)
+     * @param onProgress receives the server's progress, or {@code null}
+     * @param shouldCancel polled as progress arrives; true stops the walk (sources already registered stay), or {@code null}
+     * @throws UnsupportedOperationException if this client cannot register
+     * @throws IOException if the call fails
+     */
+    default SourceChanges.AddResult registerLocalPath(String path, boolean cloud,
+            Consumer<SourceChanges.AddProgress> onProgress, BooleanSupplier shouldCancel) throws IOException {
+        throw new UnsupportedOperationException("adding sources is not supported by this client");
+    }
+
+    /**
+     * Unregisters the sources a drop made, by the {@code dnd://} root URL. The files are not touched.
+     *
+     * @throws UnsupportedOperationException if this client cannot deregister
+     * @throws IOException if the call fails
+     */
+    default SourceChanges.RemoveResult deregisterLocalPath(String rootUrl) throws IOException {
+        throw new UnsupportedOperationException("removing sources is not supported by this client");
+    }
 }
