@@ -294,7 +294,7 @@ public class TensorBrowserPanelTest {
                 TreeModelBuilderTest.tensor("s1/0", "uint8", 2)), "x");
         edt(() -> {
             javax.swing.JPopupMenu m = panel.menuFor(TreeModelBuilder.nodeOf(n));
-            assertEquals(3, m.getComponentCount());
+            assertEquals(4, m.getComponentCount()); // Open, coarser, ROIs, Metadata…
             ((javax.swing.JMenuItem) m.getComponent(2)).doClick();
         });
         assertEquals(Arrays.asList("open s1/0 0", "rois s1/0"), calls);

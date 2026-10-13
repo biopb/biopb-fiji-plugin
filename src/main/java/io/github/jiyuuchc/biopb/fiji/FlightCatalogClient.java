@@ -94,6 +94,12 @@ public final class FlightCatalogClient implements CatalogClient {
     }
 
     @Override
+    public Map<String, Object> getSourceMetadata(String sourceId) throws IOException {
+        Map<String, Object> m = client.getSourceMetadata(sourceId);
+        return m == null ? Collections.<String, Object>emptyMap() : m;
+    }
+
+    @Override
     public Map<String, Object> resolveSource(String sourceId, Consumer<ResolveProgress> onProgress,
             BooleanSupplier shouldCancel) throws IOException {
         // The SDK hands back a root the caller must close; copy the row out and close it.

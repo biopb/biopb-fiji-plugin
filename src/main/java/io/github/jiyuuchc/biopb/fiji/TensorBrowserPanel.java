@@ -290,6 +290,8 @@ public class TensorBrowserPanel extends JPanel {
         }
     });
     private final JButton cancelResolve = new JButton("Cancel resolve");
+    private final MetadataPane infoPane = new MetadataPane(v -> status.setText("Copied " + v));
+    private final Set<MetadataDialog> metadataDialogs = new HashSet<>(); // open, non-modal; closed with the connection
     /** Asks (title, message) before a cloud download; true to go ahead. Tests replace it. */
     BiPredicate<String, String> confirmDownload = (title, message) -> JOptionPane.showConfirmDialog(this, message,
             title, JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE) == JOptionPane.OK_OPTION;
@@ -343,7 +345,10 @@ public class TensorBrowserPanel extends JPanel {
         south.add(searchStatus, BorderLayout.SOUTH);
         add(top, BorderLayout.NORTH);
         add(scroll, BorderLayout.CENTER);
-        add(south, BorderLayout.SOUTH);
+        JPanel bottom = new JPanel(new BorderLayout());
+        bottom.add(infoPane, BorderLayout.NORTH);
+        bottom.add(south, BorderLayout.CENTER);
+        add(bottom, BorderLayout.SOUTH);
 
         debounce = new Timer(DEBOUNCE_MS, e -> applyFilter());
         debounce.setRepeats(false);
@@ -368,6 +373,7 @@ public class TensorBrowserPanel extends JPanel {
             if (!rebuilding) {
                 TreeModelBuilder.Node n = TreeModelBuilder.nodeOf(tree.getLastSelectedPathComponent());
                 selectedId = n == null || n.getKind() == TreeModelBuilder.Kind.NOTE ? null : n.getId();
+                updateInfoPane();
             }
         });
         tree.addMouseListener(new MouseAdapter() {
@@ -515,6 +521,7 @@ public class TensorBrowserPanel extends JPanel {
     /** Stops the watcher and closes the connection; the panel is not used again. */
     public void dispose() {
         disposed = true;
+        closeMetadataDialogs();
         forgetResolve();
         connectGen++;
         searchGen++;
@@ -565,6 +572,7 @@ public class TensorBrowserPanel extends JPanel {
 
     private void install(Connection c, SourceList l, String name) {
         forgetResolve();
+        closeMetadataDialogs();
         release(connection, list);
         connection = c;
         connectionName = name;
@@ -646,6 +654,7 @@ public class TensorBrowserPanel extends JPanel {
         } finally {
             rebuilding = false;
         }
+        updateInfoPane();
         if (keepView) {
             SwingUtilities.invokeLater(() -> scroll.getViewport().setViewPosition(pos));
         }
@@ -914,6 +923,7 @@ public class TensorBrowserPanel extends JPanel {
                     : item(n.getUnresolved() == TreeModelBuilder.Unresolved.CLOUD ? "Resolve (downloads file)…"
                             : n.getUnresolved() == TreeModelBuilder.Unresolved.FAILED ? "Retry loading" : "Load now",
                             () -> resolveSource(id)));
+            menu.add(item("Metadata…", () -> showMetadata(n)));
             return menu;
         }
         if (n.getKind() == TreeModelBuilder.Kind.FOLDER || n.getKind() == TreeModelBuilder.Kind.NOTE
@@ -939,7 +949,85 @@ public class TensorBrowserPanel extends JPanel {
                 }
             }));
         }
+        menu.add(item("Metadata…", () -> showMetadata(n)));
         return menu;
+    }
+
+    // --- metadata ------------------------------------------------------------
+
+    /** What the pane and dialog say about row {@code n}, or {@code null} if it is not a source or tensor on the list. */
+    private MetadataTarget targetOf(TreeModelBuilder.Node n) {
+        SourceList l = list;
+        if (l == null || n == null) {
+            return null;
+        }
+        Map<String, Map<String, Object>> sources = l.getSources();
+        if (n.getKind() == TreeModelBuilder.Kind.SOURCE) {
+            Map<String, Object> row = sources.get(n.getKey());
+            return row == null ? null : MetadataTarget.of(row, n.getArrayIds().size() == 1 ? n.getArrayIds().get(0) : null);
+        }
+        if (n.getKind() == TreeModelBuilder.Kind.TENSOR) {
+            String sourceId = MetadataTarget.sourceIdOf(sources, n.getKey());
+            return sourceId == null ? null : MetadataTarget.of(sources.get(sourceId), n.getKey());
+        }
+        return null;
+    }
+
+    private void updateInfoPane() {
+        infoPane.show(targetOf(TreeModelBuilder.nodeOf(tree.getLastSelectedPathComponent())));
+    }
+
+    /**
+     * Opens the metadata window for row {@code n} at once, in a loading state, and reads the metadata
+     * off the EDT. The answer is dropped (and the window closed) if the connection was replaced or the
+     * panel disposed meanwhile; a failure is shown in the window.
+     */
+    void showMetadata(TreeModelBuilder.Node n) {
+        MetadataTarget target = targetOf(n);
+        Connection c = connection;
+        if (target == null || c == null || disposed) {
+            return;
+        }
+        MetadataDialog dialog = new MetadataDialog(SwingUtilities.getWindowAncestor(this), target);
+        dialog.sourceRow().setOnCopied(v -> status.setText("Copied " + v));
+        dialog.tensorRow().setOnCopied(v -> status.setText("Copied " + v));
+        metadataDialogs.add(dialog);
+        dialog.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowClosed(java.awt.event.WindowEvent e) { metadataDialogs.remove(dialog); }
+        });
+        dialog.setVisible(true);
+        String sourceId = target.getSourceId();
+        new SwingWorker<Map<String, Object>, Void>() {
+            @Override protected Map<String, Object> doInBackground() throws IOException {
+                return c.catalog().getSourceMetadata(sourceId);
+            }
+
+            @Override protected void done() {
+                if (disposed || c != connection || !dialog.isDisplayable()) {
+                    dialog.dispose(); // stale (or already closed by the user): nothing to show it in
+                    return;
+                }
+                try {
+                    dialog.showMetadata(get());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (ExecutionException e) {
+                    Throwable why = e.getCause() != null ? e.getCause() : e;
+                    LOG.log(Level.WARNING, "Could not read the metadata of " + sourceId, why);
+                    dialog.showError(why instanceof UnsupportedOperationException
+                            ? "this server does not provide source metadata" : OpenFailure.describe(why));
+                } catch (java.util.concurrent.CancellationException e) {
+                    dialog.dispose();
+                }
+            }
+        }.execute();
+    }
+
+    private void closeMetadataDialogs() {
+        for (MetadataDialog d : new ArrayList<>(metadataDialogs)) {
+            d.dispose();
+        }
+        metadataDialogs.clear();
     }
 
     private static JMenuItem item(String text, Runnable action) {
@@ -1149,6 +1237,7 @@ public class TensorBrowserPanel extends JPanel {
         } finally {
             rebuilding = false;
         }
+        updateInfoPane();
     }
 
     // --- rendering -----------------------------------------------------------
@@ -1199,6 +1288,8 @@ public class TensorBrowserPanel extends JPanel {
     void simulateCatalogChange() { onCatalogChanged(); }
 
     JTree getTree() { return tree; }
+    MetadataPane getInfoPane() { return infoPane; }
+    Set<MetadataDialog> getMetadataDialogs() { return metadataDialogs; }
     JTextField getAddressField() { return address; }
 
     JPasswordField getTokenField() { return token; }

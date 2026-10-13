@@ -345,7 +345,7 @@ public class TensorBrowserPanelResolveTest {
         edt(() -> {
             for (String[] e : expect) {
                 JPopupMenu m = panel.menuFor(TreeModelBuilder.nodeOf(child(e[0])));
-                assertEquals(1, m.getComponentCount());
+                assertEquals(2, m.getComponentCount()); // the resolve action, Metadata…
                 assertEquals(e[1], ((JMenuItem) m.getComponent(0)).getText());
             }
         });

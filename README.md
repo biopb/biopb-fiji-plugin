@@ -71,6 +71,14 @@ the server when you look at them.
    added to the overlay of the already-open image (opened from the same connection; the current image if several match, else the finest level). Open the image first. The status
    line reports how many loaded, how many were skipped and why, and whether the
    server's per-tensor cap truncated the set.
+6. **Metadata…** (right-click a source or tensor): opens a window that does not block the browser,
+   with the source's path, shape and dtype, the source id and array id (each with a **Copy** button
+   that copies the exact id), and the server's metadata for the source as selectable, indented text.
+   Entries that are empty (null, blank, or only empty values) are left out, as in the napari widget.
+   The metadata is read in the background; the window opens at once and shows the error if the read
+   fails or the server does not provide metadata. It closes if the browser reconnects or is closed.
+   Selecting a tensor also shows its source id, array id, shape, dtype and dims (with Copy buttons)
+   under the tree.
 
 ### Cloud / unresolved sources
 
