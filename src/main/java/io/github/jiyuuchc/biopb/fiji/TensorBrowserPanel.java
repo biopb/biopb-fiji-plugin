@@ -139,11 +139,36 @@ public class TensorBrowserPanel extends JPanel {
 
     private static final java.util.regex.Pattern SCHEME = java.util.regex.Pattern.compile("^([A-Za-z][A-Za-z0-9+.-]*)://");
 
-    /** Whether {@code url}'s host is this machine ({@code localhost}, {@code 127.*}, {@code ::1}); no DNS lookup. */
+    /**
+     * Whether {@code url}'s host is this machine: {@code localhost} (also {@code localhost.}) or an IP
+     * literal that is a loopback address ({@code 127.0.0.1}, {@code [::1]}, {@code ::ffff:127.0.0.1}).
+     * Names are never resolved: {@code ip6-localhost} counts as remote.
+     */
     static boolean isLoopback(String url) {
-        String host = url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceFirst("(?::\\d+)?(?:/.*)?$", "");
-        host = host.replaceAll("^\\[|\\]$", "");
-        return host.equalsIgnoreCase("localhost") || host.matches("127(\\.\\d{1,3}){3}") || host.equals("::1");
+        String h = url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceFirst("[/?#].*$", "");
+        if (h.startsWith("[")) {
+            h = h.substring(1, Math.max(1, h.indexOf(']') < 0 ? h.length() : h.indexOf(']')));
+        } else if (h.indexOf(':') == h.lastIndexOf(':')) { // host or host:port, not a bare IPv6 literal
+            h = h.replaceFirst(":\\d*$", "");
+        }
+        if (h.equalsIgnoreCase("localhost") || h.equalsIgnoreCase("localhost.")) {
+            return true;
+        }
+        boolean v4 = h.matches("\\d{1,3}(\\.\\d{1,3}){3}");
+        if (v4) {
+            for (String octet : h.split("\\.")) {
+                if (Integer.parseInt(octet) > 255) {
+                    return false; // not an address; Java would try DNS on it
+                }
+            }
+        } else if (h.indexOf(':') < 0 || !h.matches("[0-9A-Fa-f:.%\\w]+")) {
+            return false; // a name
+        }
+        try {
+            return java.net.InetAddress.getByName(h).isLoopbackAddress(); // a literal: no lookup
+        } catch (java.net.UnknownHostException e) {
+            return false;
+        }
     }
 
     /** Whether {@code url} (as {@link #toUrl} returns it, or the SDK reports it) is a TLS address. */
@@ -243,6 +268,7 @@ public class TensorBrowserPanel extends JPanel {
                 ? "Not used when the address is empty: discovery finds the token itself (BIOPB_TENSOR_TOKEN or the control plane)"
                 : "Bearer token, sent only to the address typed here (refused over plaintext to a non-local host)");
     };
+    private boolean dialogOpen; // EDT: a connect-error dialog is up
     private int searchGen;
     private final Set<String> expanded = new HashSet<>(); // folders open in the folder view
     private Set<String> searchOpen = new HashSet<>(); // folders open in the search view
@@ -401,11 +427,7 @@ public class TensorBrowserPanel extends JPanel {
             String msg = "Not sending the token to " + describe(url) + ": it would cross the network unencrypted. "
                     + "Use grpc+tls://" + url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "") + " (or clear the Token field).";
             status.setText(msg);
-            SwingUtilities.invokeLater(() -> {
-                if (!disposed) {
-                    errorDialog.accept(msg);
-                }
-            });
+            notifyError(msg, connectGen);
             return;
         }
         String target = discover ? "the discovered server" : describe(url);
@@ -444,11 +466,7 @@ public class TensorBrowserPanel extends JPanel {
                         status.setText(connection == null ? "Connection failed: " + why
                                 : "Connection to " + target + " failed (" + why
                                         + "); still connected to " + connectionName);
-                        SwingUtilities.invokeLater(() -> {
-                            if (!disposed && gen == connectGen) { // not from a closed panel or a stale connect
-                                errorDialog.accept(why);
-                            }
-                        });
+                        notifyError(why, gen);
                     }
                     return;
                 }
@@ -465,6 +483,24 @@ public class TensorBrowserPanel extends JPanel {
 
     /** Replaces the dialog shown when a connect fails (tests; the default is a message dialog). EDT. */
     void setErrorDialog(java.util.function.Consumer<String> dialog) { errorDialog = dialog; }
+
+    /** Shows {@code message} in a dialog unless headless, disposed, stale ({@code gen}) or one is already up. */
+    private void notifyError(String message, int gen) {
+        if (java.awt.GraphicsEnvironment.isHeadless()) {
+            return; // the status line has it
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (disposed || gen != connectGen || dialogOpen) {
+                return;
+            }
+            dialogOpen = true;
+            try {
+                errorDialog.accept(message);
+            } finally {
+                dialogOpen = false;
+            }
+        });
+    }
 
     private void showConnectError(String message) {
         javax.swing.JTextArea text = new javax.swing.JTextArea(message, Math.min(12, message.length() / 60 + 2), 60);

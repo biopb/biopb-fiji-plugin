@@ -86,6 +86,8 @@ jobs:
           mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
           .github/scripts/jars.sh after ./Fiji.app
       - name: Smoke test (headless)
+        env:
+          BIOPB_STATE_HOME: ${{ runner.temp }}/biopb-state # scratch: the TLS check writes a certificate there
         run: ./Fiji.app/fiji-linux-x64 --headless --run .github/scripts/smoke.groovy
       # Builds the real window in Fiji's GUI on a virtual display.
       - name: Smoke test (GUI, xvfb)

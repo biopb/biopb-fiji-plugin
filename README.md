@@ -18,7 +18,7 @@ the server when you look at them.
 - **Update site** (once published): in Fiji, *Help > Update... > Manage update
   sites*, tick the BioPB site, apply the changes and restart Fiji.
 - **Manual**: build and install into a Fiji.app. This copies the plugin jar and
-  the dependencies Fiji lacks (Arrow, Flight, netty-tcnative, ...) into the
+  the dependencies Fiji lacks (Arrow, Flight, grpc-netty, ...) into the
   install:
 
       mvn install -DskipTests -Dscijava.app.directory=/path/to/Fiji.app -Ddelete.other.versions=true
@@ -79,7 +79,7 @@ Connections go through the biopb SDK's `Connection`, so trust works as in the Py
    (loopback) is verified against the certificate it serves and is **never pinned**, so it has no entry in the
    pin file.
 
-Set these in the environment Fiji is started from. Pins live in `~/.local/state/biopb/tls-known-hosts.json`
+TLS runs on Fiji's own netty with the JDK's TLS provider (no native OpenSSL is installed). Set these in the environment Fiji is started from. Pins live in `~/.local/state/biopb/tls-known-hosts.json`
 (`$BIOPB_STATE_HOME/biopb/` if `BIOPB_STATE_HOME` is set; same path on every platform): a JSON object mapping
 `host:port` to the pinned certificate, **shared with the Python clients and the napari widget**, so a pin made by
 one holds for all. To accept a legitimately rotated certificate, delete that `host:port` entry from the file

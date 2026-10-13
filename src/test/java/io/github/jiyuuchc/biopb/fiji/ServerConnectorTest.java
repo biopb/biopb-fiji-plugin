@@ -80,10 +80,11 @@ public class ServerConnectorTest {
 
     @Test
     public void loopbackHosts() {
-        for (String u : new String[] {"grpc://localhost:1", "grpc://LOCALHOST:1", "grpc://127.0.0.1:1", "grpc://127.1.2.3:1", "grpc://[::1]:1"}) {
+        for (String u : new String[] {"grpc://localhost:1", "grpc://LOCALHOST:1", "grpc://127.0.0.1:1", "grpc://127.1.2.3:1", "grpc://[::1]:1", "grpc://localhost.:1",
+            "grpc+tls://[0:0:0:0:0:0:0:1]:8815", "::1", "::ffff:127.0.0.1", "grpc://[::ffff:127.0.0.1]:3", "127.0.0.1"}) {
             assertTrue(u, TensorBrowserPanel.isLoopback(u));
         }
-        for (String u : new String[] {"grpc://example.org:1", "grpc://10.0.0.1:1", "grpc://127.example.org:1x", "grpc://[::2]:1"}) {
+        for (String u : new String[] {"grpc://example.org:1", "grpc://10.0.0.1:1", "grpc://127.example.org:1x", "grpc://[::2]:1", "127.999.1.1:5", "grpc://ip6-localhost:1", "ip6-localhost", "grpc://localhost.example.org:1"}) {
             assertFalse(u, TensorBrowserPanel.isLoopback(u));
         }
     }
@@ -283,5 +284,28 @@ public class ServerConnectorTest {
         Thread.sleep(500);
         SwingUtilities.invokeAndWait(() -> { });
         assertTrue(dialogs.isEmpty());
+    }
+
+    @Test
+    public void aSecondConnectWhileADialogIsUpDoesNotStackAnother() throws Exception {
+        Assume.assumeFalse(GraphicsEnvironment.isHeadless());
+        List<String> dialogs = new CopyOnWriteArrayList<>();
+        TensorBrowserPanel p = new TensorBrowserPanel((u, t) -> { throw new IOException("down"); }, "example.org:1", SECRET);
+        try {
+            SwingUtilities.invokeAndWait(() -> p.setErrorDialog(m -> {
+                dialogs.add(m);
+                p.connect(); // a click while the dialog is up; its own dialog is queued ...
+                java.awt.SecondaryLoop loop = java.awt.Toolkit.getDefaultToolkit().getSystemEventQueue().createSecondaryLoop();
+                SwingUtilities.invokeLater(loop::exit); // ... and runs inside this nested loop, as under a modal dialog
+                loop.enter();
+            }));
+            SwingUtilities.invokeAndWait(p::connect);
+            await(() -> !dialogs.isEmpty());
+            Thread.sleep(500);
+            SwingUtilities.invokeAndWait(() -> { });
+            assertEquals(1, dialogs.size());
+        } finally {
+            SwingUtilities.invokeAndWait(p::dispose);
+        }
     }
 }
