@@ -116,7 +116,10 @@ jobs:
       - name: Install the plugin and the jars Fiji lacks
         run: |
           mvn -B -q versions:set -DnewVersion="${TAG#v}" -DgenerateBackupPoms=false
+          .github/scripts/jars.sh before ./Fiji.app
           mvn -B install -DskipTests -Dscijava.app.directory=./Fiji.app -Ddelete.other.versions=true
+          # Fail rather than publish replacements for Fiji's shared jars (netty, grpc-netty, ...).
+          .github/scripts/jars.sh after ./Fiji.app
       - name: Upload to the update site
         env:
           UPDATE_PASS: ${{ secrets.IMAGEJ_PW }}

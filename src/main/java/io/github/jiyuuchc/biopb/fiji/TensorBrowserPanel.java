@@ -29,6 +29,7 @@ import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JPasswordField;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
@@ -84,27 +85,101 @@ public class TensorBrowserPanel extends JPanel {
         /** The Flight client, for reading tensors; {@code null} for a test double. */
         TensorFlightClient flight();
 
+        /** The URL dialed (scheme included), or {@code null} if unknown (a test double). */
+        default String url() { return null; }
+
         @Override
         void close();
     }
 
     /** Opens connections; the seam tests replace. */
     public interface ClientFactory {
-        /** Connects to a server (called off the EDT). */
-        Connection connect(String host, int port) throws IOException;
+        /**
+         * Connects to a server (called off the EDT).
+         *
+         * @param url {@code grpc://}, {@code grpc+tcp://} or {@code grpc+tls://} URL, or {@code null}
+         *     to discover the server
+         * @param token the bearer token for {@code url}, or {@code null}; never log it
+         * @throws IOException with a message fit to show the user
+         */
+        Connection connect(String url, String token) throws IOException;
     }
 
-    /** The real factory: a {@link TensorFlightClient} read through a {@link FlightCatalogClient}. */
+    /** The real factory: the SDK's {@code Connection} (TLS trust, shared pin file, discovery). */
     public static ClientFactory flightFactory() {
-        return (host, port) -> {
-            TensorFlightClient flight = new TensorFlightClient(host, port);
-            FlightCatalogClient catalog = new FlightCatalogClient(flight);
-            return new Connection() {
-                @Override public CatalogClient catalog() { return catalog; }
-                @Override public TensorFlightClient flight() { return flight; }
-                @Override public void close() { flight.close(); }
-            };
-        };
+        return new ServerConnector();
+    }
+
+    /** The token to start with: {@code BIOPB_TENSOR_TOKEN} if {@code env} has it, else empty. */
+    public static String defaultToken(Function<String, String> env) {
+        String v = env.apply("BIOPB_TENSOR_TOKEN");
+        return v == null ? "" : v.trim();
+    }
+
+    /**
+     * The URL the SDK dials for a typed address: {@code host[:port]} is plaintext
+     * ({@code grpc://}); {@code grpc://}, {@code grpc+tcp://}, {@code grpc+tls://} and
+     * {@code grpcs://} keep their scheme. The path is dropped; the default port is filled in.
+     */
+    static String toUrl(String address) {
+        String a = address.trim();
+        java.util.regex.Matcher m = SCHEME.matcher(a);
+        String scheme = "grpc";
+        if (m.find()) { // the scheme is read and checked once, before the host and port are parsed
+            scheme = m.group(1).toLowerCase(java.util.Locale.ROOT);
+            if (!scheme.matches("grpc|grpc\\+tcp|grpc\\+tls|grpcs")) {
+                throw new IllegalArgumentException("Unsupported scheme '" + scheme + "://' (use grpc://, grpc+tls:// or host:port)");
+            }
+            a = a.substring(m.end());
+        }
+        Object[] hp = parseAddress(a);
+        String host = (String) hp[0];
+        return scheme + "://" + (host.indexOf(':') >= 0 && !host.startsWith("[") ? "[" + host + "]" : host) + ":" + hp[1];
+    }
+
+    private static final java.util.regex.Pattern SCHEME = java.util.regex.Pattern.compile("^([A-Za-z][A-Za-z0-9+.-]*)://");
+
+    /**
+     * Whether {@code url}'s host is this machine: {@code localhost} (also {@code localhost.}) or an IP
+     * literal that is a loopback address ({@code 127.0.0.1}, {@code [::1]}, {@code ::ffff:127.0.0.1}).
+     * Names are never resolved: {@code ip6-localhost} counts as remote.
+     */
+    static boolean isLoopback(String url) {
+        String h = url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceFirst("[/?#].*$", "");
+        if (h.startsWith("[")) {
+            h = h.substring(1, Math.max(1, h.indexOf(']') < 0 ? h.length() : h.indexOf(']')));
+        } else if (h.indexOf(':') == h.lastIndexOf(':')) { // host or host:port, not a bare IPv6 literal
+            h = h.replaceFirst(":\\d*$", "");
+        }
+        if (h.equalsIgnoreCase("localhost") || h.equalsIgnoreCase("localhost.")) {
+            return true;
+        }
+        boolean v4 = h.matches("\\d{1,3}(\\.\\d{1,3}){3}");
+        if (v4) {
+            for (String octet : h.split("\\.")) {
+                if (Integer.parseInt(octet) > 255) {
+                    return false; // not an address; Java would try DNS on it
+                }
+            }
+        } else if (h.indexOf(':') < 0 || !h.matches("[0-9A-Fa-f:.%\\w]+")) {
+            return false; // a name
+        }
+        try {
+            return java.net.InetAddress.getByName(h).isLoopbackAddress(); // a literal: no lookup
+        } catch (java.net.UnknownHostException e) {
+            return false;
+        }
+    }
+
+    /** Whether {@code url} (as {@link #toUrl} returns it, or the SDK reports it) is a TLS address. */
+    static boolean isTls(String url) {
+        return url.regionMatches(true, 0, "grpc+tls://", 0, 11) || url.regionMatches(true, 0, "grpcs://", 0, 8);
+    }
+
+    /** {@code host:port (TLS)} or {@code host:port (plaintext)} for a dialed URL. */
+    static String describe(String url) {
+        return url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "").replaceFirst("/.*$", "")
+                + (isTls(url) ? " (TLS)" : " (plaintext)");
     }
 
     /** The address to start with: {@code BIOPB_TENSOR_URL} if {@code env} has it, else {@link #DEFAULT_ADDRESS}. */
@@ -119,8 +194,15 @@ public class TensorBrowserPanel extends JPanel {
      */
     static Object[] parseAddress(String address) {
         String a = address.trim().replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "");
-        int slash = a.indexOf('/');
-        a = slash < 0 ? a : a.substring(0, slash);
+        int end = a.length();
+        for (char c : new char[] {'/', '?', '#'}) { // a path, query or fragment is dropped
+            int i = a.indexOf(c);
+            end = i >= 0 ? Math.min(end, i) : end;
+        }
+        a = a.substring(0, end);
+        if (a.indexOf('@') >= 0) {
+            throw new IllegalArgumentException("Bad address '" + address + "': no user name or password in the address");
+        }
         if (a.isEmpty()) {
             throw new IllegalArgumentException("Enter host:port");
         }
@@ -157,6 +239,7 @@ public class TensorBrowserPanel extends JPanel {
     private final ClientFactory factory;
     private final List<TensorBrowserListener> listeners = new CopyOnWriteArrayList<>();
     private final JTextField address = new JTextField(18);
+    private final JPasswordField token = new JPasswordField(10);
     private final JButton connectButton = new JButton("Connect");
     private final JLabel status = new JLabel(" ");
     private final JTextField search = new JTextField();
@@ -177,6 +260,15 @@ public class TensorBrowserPanel extends JPanel {
     private final Set<String> openSources = new HashSet<>(); // multi-tensor sources open
     private SourceList list;
     private int connectGen;
+    private java.util.function.Consumer<String> errorDialog = this::showConnectError;
+    private final Runnable syncToken = () -> {
+        boolean discover = address.getText().trim().isEmpty();
+        token.setEnabled(connectButton.isEnabled() && !discover);
+        token.setToolTipText(discover
+                ? "Not used when the address is empty: discovery finds the token itself (BIOPB_TENSOR_TOKEN or the control plane)"
+                : "Bearer token, sent only to the address typed here (refused over plaintext to a non-local host)");
+    };
+    private boolean dialogOpen; // EDT: a connect-error dialog is up
     private int searchGen;
     private final Set<String> expanded = new HashSet<>(); // folders open in the folder view
     private Set<String> searchOpen = new HashSet<>(); // folders open in the search view
@@ -204,7 +296,7 @@ public class TensorBrowserPanel extends JPanel {
 
     /** A panel connecting through {@link #flightFactory()}, starting at {@code BIOPB_TENSOR_URL}. */
     public TensorBrowserPanel() {
-        this(flightFactory(), defaultAddress(System::getenv));
+        this(flightFactory(), defaultAddress(System::getenv), defaultToken(System::getenv));
     }
 
     /**
@@ -212,9 +304,21 @@ public class TensorBrowserPanel extends JPanel {
      * @param initialAddress the address field's initial text
      */
     public TensorBrowserPanel(ClientFactory factory, String initialAddress) {
+        this(factory, initialAddress, "");
+    }
+
+    /**
+     * @param factory opens connections
+     * @param initialAddress the address field's initial text (empty: discover the server)
+     * @param initialToken the token field's initial text
+     */
+    public TensorBrowserPanel(ClientFactory factory, String initialAddress, String initialToken) {
         super(new BorderLayout(0, 4));
-        this.factory = (h, p) -> new RefCountedConnection(factory.connect(h, p));
+        this.factory = (u, t) -> new RefCountedConnection(factory.connect(u, t));
         address.setText(initialAddress);
+        address.setToolTipText("host:port, grpc://host:port or grpc+tls://host:port; empty: discover the local server");
+        token.setText(initialToken);
+        syncToken.run();
         tree.setRootVisible(false);
         tree.setShowsRootHandles(true);
         tree.setToggleClickCount(0); // double-click opens; the handles expand
@@ -225,6 +329,8 @@ public class TensorBrowserPanel extends JPanel {
         JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
         bar.add(new JLabel("Server"));
         bar.add(address);
+        bar.add(new JLabel("Token"));
+        bar.add(token);
         bar.add(connectButton);
         cancelResolve.setVisible(false);
         bar.add(cancelResolve);
@@ -249,6 +355,11 @@ public class TensorBrowserPanel extends JPanel {
         connectButton.addActionListener(e -> connect());
         cancelResolve.addActionListener(e -> cancelResolve());
         address.addActionListener(e -> connect());
+        address.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { syncToken.run(); }
+            @Override public void removeUpdate(DocumentEvent e) { syncToken.run(); }
+            @Override public void changedUpdate(DocumentEvent e) { syncToken.run(); }
+        });
         tree.addTreeExpansionListener(new TreeExpansionListener() {
             @Override public void treeExpanded(TreeExpansionEvent e) { onExpanded(e.getPath()); }
             @Override public void treeCollapsed(TreeExpansionEvent e) { onCollapsed(e.getPath()); }
@@ -300,22 +411,34 @@ public class TensorBrowserPanel extends JPanel {
         if (disposed || !connectButton.isEnabled()) {
             return; // one connect at a time
         }
-        Object[] hp;
+        boolean discover = address.getText().trim().isEmpty();
+        String url;
         try {
-            hp = parseAddress(address.getText());
+            url = discover ? null : toUrl(address.getText());
         } catch (IllegalArgumentException e) {
             status.setText(e.getMessage());
             return;
         }
-        String host = (String) hp[0];
-        int port = (Integer) hp[1];
+        char[] typed = token.getPassword();
+        String secret = typed.length == 0 || discover ? null : new String(typed).trim();
+        java.util.Arrays.fill(typed, '\0');
+        String tokenArg = secret == null || secret.isEmpty() ? null : secret;
+        if (tokenArg != null && !isTls(url) && !isLoopback(url)) {
+            String msg = "Not sending the token to " + describe(url) + ": it would cross the network unencrypted. "
+                    + "Use grpc+tls://" + url.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*://", "") + " (or clear the Token field).";
+            status.setText(msg);
+            notifyError(msg, connectGen);
+            return;
+        }
+        String target = discover ? "the discovered server" : describe(url);
         int gen = ++connectGen;
         connectButton.setEnabled(false);
         address.setEnabled(false);
-        status.setText("Connecting to " + host + ":" + port + "…");
+        token.setEnabled(false);
+        status.setText("Connecting to " + target + "…");
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
-                Connection c = factory.connect(host, port);
+                Connection c = factory.connect(url, tokenArg);
                 SourceList l = null;
                 try {
                     l = new SourceList(c.catalog());
@@ -331,6 +454,7 @@ public class TensorBrowserPanel extends JPanel {
                 if (!disposed) { // however it ended, the controls are usable again
                     connectButton.setEnabled(true);
                     address.setEnabled(true);
+                    syncToken.run();
                 }
                 Object[] r;
                 try {
@@ -340,8 +464,9 @@ public class TensorBrowserPanel extends JPanel {
                         Throwable cause = e.getCause() == null ? e : e.getCause();
                         String why = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getName();
                         status.setText(connection == null ? "Connection failed: " + why
-                                : "Connection to " + host + ":" + port + " failed (" + why
+                                : "Connection to " + target + " failed (" + why
                                         + "); still connected to " + connectionName);
+                        notifyError(why, gen);
                     }
                     return;
                 }
@@ -351,9 +476,40 @@ public class TensorBrowserPanel extends JPanel {
                     release(c, l);
                     return;
                 }
-                install(c, l, host + ":" + port);
+                install(c, l, c.url() != null ? describe(c.url()) : url != null ? describe(url) : "the discovered server");
             }
         }.execute();
+    }
+
+    /** Replaces the dialog shown when a connect fails (tests; the default is a message dialog). EDT. */
+    void setErrorDialog(java.util.function.Consumer<String> dialog) { errorDialog = dialog; }
+
+    /** Shows {@code message} in a dialog unless headless, disposed, stale ({@code gen}) or one is already up. */
+    private void notifyError(String message, int gen) {
+        if (java.awt.GraphicsEnvironment.isHeadless()) {
+            return; // the status line has it
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (disposed || gen != connectGen || dialogOpen) {
+                return;
+            }
+            dialogOpen = true;
+            try {
+                errorDialog.accept(message);
+            } finally {
+                dialogOpen = false;
+            }
+        });
+    }
+
+    private void showConnectError(String message) {
+        javax.swing.JTextArea text = new javax.swing.JTextArea(message, Math.min(12, message.length() / 60 + 2), 60);
+        text.setLineWrap(true);
+        text.setWrapStyleWord(true);
+        text.setEditable(false);
+        text.setOpaque(false);
+        JOptionPane.showMessageDialog(SwingUtilities.getWindowAncestor(this), new JScrollPane(text),
+                "Connection failed", JOptionPane.ERROR_MESSAGE);
     }
 
     /** Stops the watcher and closes the connection; the panel is not used again. */
@@ -1044,6 +1200,8 @@ public class TensorBrowserPanel extends JPanel {
 
     JTree getTree() { return tree; }
     JTextField getAddressField() { return address; }
+
+    JPasswordField getTokenField() { return token; }
     JTextField getSearchField() { return search; }
     JLabel getStatusLabel() { return status; }
     JLabel getSearchStatusLabel() { return searchStatus; }

@@ -65,4 +65,6 @@ public final class RefCountedConnection implements TensorBrowserPanel.Connection
     @Override public CatalogClient catalog() { return delegate.catalog(); }
 
     @Override public TensorFlightClient flight() { return delegate.flight(); }
+
+    @Override public String url() { return delegate.url(); }
 }

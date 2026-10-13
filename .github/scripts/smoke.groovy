@@ -1,6 +1,8 @@
 // Headless smoke test run inside Fiji: ./Fiji.app/fiji-linux-x64 --headless --run smoke.groovy
 // Exits non-zero on any failure.
 #@ CommandService cs
+import org.apache.arrow.flight.*
+import org.apache.arrow.memory.RootAllocator
 try {
     // 1. the command is discovered with its menu path
     def info = cs.getCommand("io.github.jiyuuchc.biopb.fiji.TensorBrowserCommand")
@@ -49,6 +51,74 @@ try {
         alloc.close()
     }
     println("OK Arrow allocation")
+
+    // 4. The real gRPC/netty/TLS path on Fiji's own netty (jars.sh checks the install left it alone):
+    //    an in-process Flight server on 127.0.0.1 answering what the SDK asks of a tensor server, reached
+    //    (a) by a raw flight-core TLS client and (b) through the plugin's ServerConnector, over TLS and in
+    //    plaintext. A NoClassDefFoundError / NoSuchMethodError anywhere fails the test.
+    //    The SDK verifies a loopback TLS server against $BIOPB_STATE_HOME/biopb/tls/server-cert.pem, so
+    //    this needs BIOPB_STATE_HOME pointing at a scratch directory (never the real state dir).
+    def stateHome = System.getenv("BIOPB_STATE_HOME")
+    if (!stateHome) throw new RuntimeException("set BIOPB_STATE_HOME to a scratch directory for the TLS smoke test")
+    def quietly = { Closure c -> try { c() } catch (Throwable ignored) { } } // cleanup must not mask the real error
+    def dir = java.nio.file.Files.createTempDirectory("biopb-smoke").toFile()
+    def stateCert = new File(stateHome, "biopb/tls/server-cert.pem")
+    RootAllocator alloc2 = null
+    def tlsServer = null, plainServer = null
+    try {
+        def cert = new File(dir, "cert.pem"), key = new File(dir, "key.pem")
+        def gen = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
+                   "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-keyout", key.path, "-out", cert.path].execute()
+        gen.waitForProcessOutput(new StringBuffer(), new StringBuffer())
+        if (gen.exitValue() != 0 || !cert.exists()) throw new RuntimeException("openssl could not make a certificate")
+        stateCert.parentFile.mkdirs()
+        stateCert.bytes = cert.bytes
+        alloc2 = new RootAllocator(Long.MAX_VALUE)
+        def allocator = alloc2
+        def producer = new NoOpFlightProducer() {
+            void listActions(FlightProducer.CallContext c, FlightProducer.StreamListener<ActionType> l) {
+                l.onNext(new ActionType("health", "health")); l.onCompleted()
+            }
+            void doAction(FlightProducer.CallContext c, Action a, FlightProducer.StreamListener<Result> l) {
+                l.onNext(new Result('{"status": "SERVING", "protocol": 2}'.getBytes("UTF-8"))); l.onCompleted()
+            }
+            void getStream(FlightProducer.CallContext c, Ticket t, FlightProducer.ServerStreamListener l) { // the SDK's SELECT
+                def schema = new org.apache.arrow.vector.types.pojo.Schema([
+                    org.apache.arrow.vector.types.pojo.Field.nullable("x", new org.apache.arrow.vector.types.pojo.ArrowType.Int(32, true))])
+                def root = org.apache.arrow.vector.VectorSchemaRoot.create(schema, allocator)
+                try { l.start(root); root.setRowCount(0); l.putNext(); l.completed() } finally { root.close() }
+            }
+        }
+        tlsServer = FlightServer.builder(alloc2, Location.forGrpcTls("127.0.0.1", 0), producer).useTls(cert, key).build().start()
+        plainServer = FlightServer.builder(alloc2, Location.forGrpcInsecure("127.0.0.1", 0), producer).build().start()
+        def netty = io.netty.util.Version.identify().get("netty-common").artifactVersion()
+
+        def trusted = new FileInputStream(cert)
+        try {
+            def raw = FlightClient.builder(alloc2, Location.forGrpcTls("127.0.0.1", tlsServer.port)).trustedCertificates(trusted).build()
+            try {
+                def names = raw.listActions().collect { it.type }
+                if (names != ["health"]) throw new RuntimeException("raw TLS listActions answered " + names)
+            } finally { raw.close() }
+        } finally { trusted.close() }
+        println("OK raw TLS Flight round trip (netty " + netty + ")")
+
+        // the plugin's own path: no real pin store (the SDK's connection over an in-memory one)
+        def connector = io.github.jiyuuchc.biopb.fiji.ServerConnector.over({ new biopb.tensor.Connection(biopb.tensor.TlsPinStore.inMemory()) })
+        [["grpc+tls://127.0.0.1:" + tlsServer.port, "TLS"], ["grpc://127.0.0.1:" + plainServer.port, "plaintext"]].each { url, kind ->
+            def conn = connector.connect(url, null)
+            try {
+                if (conn.flight().healthCheck().status != "SERVING") throw new RuntimeException(kind + " health did not answer SERVING")
+            } finally { conn.close() }
+            println("OK ServerConnector " + kind + " round trip")
+        }
+    } finally {
+        quietly { tlsServer?.close() }
+        quietly { plainServer?.close() }
+        quietly { alloc2?.close() }
+        quietly { stateCert.delete() }
+        quietly { dir.deleteDir() } // takes key.pem with it
+    }
 } catch (Throwable t) {
     t.printStackTrace()
     System.err.println("SMOKE FAILED: " + t)
