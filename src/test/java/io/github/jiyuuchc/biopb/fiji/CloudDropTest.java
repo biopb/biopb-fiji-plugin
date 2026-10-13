@@ -89,6 +89,33 @@ public class CloudDropTest {
     }
 
     @Test
+    public void aDroppedLinkToAFolderIsSizedByWhatItPointsAt() throws Exception {
+        File big = tmp.newFolder("target");
+        files(big, 10);
+        File link = new File(tmp.getRoot(), "link");
+        try {
+            Files.createSymbolicLink(link.toPath(), big.toPath());
+        } catch (UnsupportedOperationException | java.io.IOException e) {
+            return; // no symlinks on this system
+        }
+        assertTrue(CloudDrop.exceedsEntryThreshold(link.getPath(), 5));
+        assertFalse(CloudDrop.exceedsEntryThreshold(link.getPath(), 10));
+    }
+
+    @Test
+    public void aLinkCycleBelowTheRootDoesNotLoop() throws Exception {
+        File root = tmp.newFolder("cyc");
+        files(root, 2);
+        try {
+            Files.createSymbolicLink(new File(root, "up").toPath(), root.toPath());
+        } catch (UnsupportedOperationException | java.io.IOException e) {
+            return;
+        }
+        assertFalse(CloudDrop.exceedsEntryThreshold(root.getPath(), 3)); // 2 files + the link
+        assertTrue(CloudDrop.exceedsEntryThreshold(root.getPath(), 2));
+    }
+
+    @Test
     public void defaultThresholdIsNapari() throws Exception {
         assertEquals(2000, CloudDrop.LARGE_ENTRY_THRESHOLD);
         File root = tmp.newFolder("small");

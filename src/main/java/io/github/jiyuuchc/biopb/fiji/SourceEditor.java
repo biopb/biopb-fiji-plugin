@@ -96,6 +96,7 @@ final class SourceEditor {
     private File lastDir;
     private AddJob adding;
     private Object removing; // the running removal's token
+    private boolean checking; // a dropped folder is being sized, off the EDT
     private final Set<String> skippedCloudPaths = new HashSet<>(); // adds that left offline files out
 
     SourceEditor(Host host) {
@@ -107,7 +108,7 @@ final class SourceEditor {
         cancelButton.setVisible(false);
         addButton.addActionListener(e -> addFromChooser());
         cancelButton.addActionListener(e -> cancelAdd());
-        view.setTransferHandler(new Handler());
+        view.setTransferHandler(new Handler(null));
         updateHint();
     }
 
@@ -117,7 +118,7 @@ final class SourceEditor {
     /** Makes {@code components} accept dropped files as well as the editor's own row. */
     void acceptDropsOn(JComponent... components) {
         for (JComponent c : components) {
-            c.setTransferHandler(new Handler());
+            c.setTransferHandler(new Handler(c.getTransferHandler()));
             if (c instanceof JTree) {
                 ((JTree) c).setDropMode(DropMode.ON); // not the default, which moves the selection while dragging
             }
@@ -127,8 +128,14 @@ final class SourceEditor {
     // --- state ---------------------------------------------------------------
 
     private DropPolicy.Decision decision() {
-        return DropPolicy.decide(host.connecting(), host.list() != null, host.url(), adding != null);
+        DropPolicy.Decision d = DropPolicy.decide(host.connecting(), host.list() != null, host.url(),
+                adding != null || checking);
+        // One change at a time: a removal holds off an add as an add holds off a removal.
+        return d.isOk() && removing != null ? new DropPolicy.Decision(false, REMOVING) : d;
     }
+
+    /** Shown while a removal runs. */
+    static final String REMOVING = "Removing data\u2026";
 
     /** Refreshes the hint and the Add button from the connection state; a running add owns the hint. */
     void updateHint() {
@@ -147,12 +154,16 @@ final class SourceEditor {
         }
         adding = null;
         removing = null;
+        checking = false;
         skippedCloudPaths.clear();
         cancelButton.setVisible(false);
         updateHint();
     }
 
     boolean isAdding() { return adding != null; }
+
+    /** Whether an add is being checked or run, or a removal runs. */
+    boolean isBusy() { return adding != null || checking || removing != null; }
 
     boolean isRemoving() { return removing != null; }
 
@@ -194,28 +205,65 @@ final class SourceEditor {
     }
 
     /**
-     * Adds a dropped or picked path: checks the gate, asks about a big folder and a cloud folder,
-     * and starts the add. The questions run a nested event loop, so the world is checked again after.
+     * Adds a dropped or picked path: checks the gate, sizes a folder off the EDT, asks about a big
+     * folder and a cloud folder, and starts the add. The questions run a nested event loop, so the
+     * world is checked again after.
      */
     void drop(String path) {
         SourceList l = host.list();
         if (!decision().isOk()) {
             return;
         }
-        if (CloudDrop.exceedsEntryThreshold(path)
-                && !prompts.confirm("Add large folder?", SourceMessages.largeFolder(path), false)) {
+        checking = true; // another drop waits for this one
+        updateHint();
+        new SwingWorker<Boolean, Void>() {
+            @Override protected Boolean doInBackground() {
+                return CloudDrop.exceedsEntryThreshold(path); // walks the folder: not on the EDT
+            }
+
+            @Override protected void done() {
+                if (!checking || l != host.list()) {
+                    return; // another connection now
+                }
+                checking = false;
+                boolean large;
+                try {
+                    large = get();
+                } catch (ExecutionException e) {
+                    large = false; // unreadable: proceed unconfirmed, as the size gate does on a walk error
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    updateHint();
+                    return;
+                }
+                afterSizing(l, path, large);
+            }
+        }.execute();
+    }
+
+    private void afterSizing(SourceList l, String path, boolean large) {
+        if (!decision().isOk() || l != host.list()) {
+            updateHint();
+            return;
+        }
+        if (large && !prompts.confirm("Add large folder?", SourceMessages.largeFolder(path), false)) {
+            updateHint();
             return; // declined scanning an oversized folder; nothing sent
         }
         String warning = CloudDrop.warning(path);
         if (warning != null && !prompts.confirm("Add source from a cloud folder?", warning, true)) {
+            updateHint();
             return;
         }
-        // A confirmed cloud folder is the user's say-so to register the offline placeholders too. Any
-        // other folder is told if the server passed some over, and asked about cloud mode when added
-        // again (the server only takes cloud mode on a folder it does not hold, so after a removal).
-        boolean cloud = warning != null || skippedCloudPaths.contains(path)
-                && prompts.confirm("Add as cloud sources?", SourceMessages.cloudRedrop(path), false);
+        // As in napari: a confirmed cloud folder is the user's say-so to register the offline
+        // placeholders too (cloud mode on). Any other folder is told if the server passed some over,
+        // and asked about cloud mode when added again (the server only takes cloud mode on a folder it
+        // does not hold, so after a removal).
+        boolean cloud = (warning != null)
+                || (skippedCloudPaths.contains(path)
+                        && prompts.confirm("Add as cloud sources?", SourceMessages.cloudRedrop(path), false));
         if (l != host.list() || !decision().isOk()) {
+            updateHint();
             return;
         }
         startAdd(l, path, cloud);
@@ -292,16 +340,19 @@ final class SourceEditor {
 
     /** Asks, then unregisters the {@code dnd://} root {@code rootUrl}, shown as {@code displayName}. */
     void remove(String rootUrl, String displayName) {
-        if (removing != null || host.list() == null) {
+        DropPolicy.Decision d = decision(); // the same gate as an add, and not while one runs
+        if (!d.isOk()) {
+            host.status("Cannot remove now: " + d.getReason());
             return;
         }
         SourceList l = host.list();
         if (!prompts.confirm("Remove dropped source?", SourceMessages.confirmRemove(displayName), false)
-                || l != host.list() || removing != null) {
+                || l != host.list() || !decision().isOk()) {
             return;
         }
         Object job = new Object();
         removing = job;
+        updateHint();
         host.status("Removing " + displayName + "…");
         new SwingWorker<SourceChanges.RemoveResult, Void>() {
             @Override protected SourceChanges.RemoveResult doInBackground() throws Exception {
@@ -313,6 +364,7 @@ final class SourceEditor {
                     return; // another connection now
                 }
                 removing = null;
+                updateHint();
                 try {
                     SourceChanges.RemoveResult r = get();
                     if (!r.getRemoved().isEmpty()) {
@@ -344,18 +396,43 @@ final class SourceEditor {
 
     // --- dropping ------------------------------------------------------------
 
-    /** Takes exactly one dropped local file or folder, copied (a move would let the source delete it). */
+    /**
+     * Takes exactly one dropped local file or folder, copied (a move would let the source delete it).
+     * Only a drop: a clipboard paste is not an add. What the component did before (copying a tree row,
+     * dragging it out) is handed to the handler it had.
+     */
     private final class Handler extends TransferHandler {
+        private final TransferHandler previous;
+
+        Handler(TransferHandler previous) {
+            this.previous = previous;
+        }
+
+        @Override public int getSourceActions(JComponent c) {
+            return previous == null ? NONE : previous.getSourceActions(c);
+        }
+
+        @Override public void exportAsDrag(JComponent c, java.awt.event.InputEvent e, int action) {
+            if (previous != null) {
+                previous.exportAsDrag(c, e, action);
+            }
+        }
+
+        @Override public void exportToClipboard(JComponent c, java.awt.datatransfer.Clipboard clip, int action)
+                throws IllegalStateException {
+            if (previous != null) {
+                previous.exportToClipboard(c, clip, action);
+            }
+        }
+
         @Override public boolean canImport(TransferSupport s) {
-            if (!s.isDataFlavorSupported(DataFlavor.javaFileListFlavor) || !decision().isOk()) {
+            if (!s.isDrop() || !s.isDataFlavorSupported(DataFlavor.javaFileListFlavor) || !decision().isOk()) {
                 return false;
             }
-            if (s.isDrop()) {
-                if ((s.getSourceDropActions() & COPY) == 0) {
-                    return false;
-                }
-                s.setDropAction(COPY);
+            if ((s.getSourceDropActions() & COPY) == 0) {
+                return false;
             }
+            s.setDropAction(COPY);
             List<File> files = files(s.getTransferable());
             return files == null || files.size() == 1; // some platforms do not say what is dragged until it lands
         }

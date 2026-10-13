@@ -79,7 +79,7 @@ public final class CloudDrop {
 
     /**
      * Whether {@code path} is a directory holding more than {@code threshold} entries (files and
-     * folders, recursively; symlinks counted, not followed). A file is never large. Stops at the
+     * folders, recursively; the root link is followed, links below it are counted, not entered). A file is never large. Stops at the
      * threshold, so it stays cheap on an enormous tree. This is the only size gate on an add, so a
      * walk error (permission, a race) reads as "not large" and the add proceeds unconfirmed rather
      * than being blocked.
@@ -87,8 +87,10 @@ public final class CloudDrop {
     public static boolean exceedsEntryThreshold(String path, int threshold) {
         final Path root;
         try {
-            root = Paths.get(path);
-        } catch (RuntimeException bad) { // InvalidPathException
+            // The dropped item itself may be a link to a folder: follow that one (and only that one;
+            // links below it are counted, not entered, so a cycle cannot loop).
+            root = Paths.get(path).toRealPath();
+        } catch (IOException | RuntimeException bad) { // InvalidPathException, a missing path
             return false;
         }
         if (!Files.isDirectory(root)) {

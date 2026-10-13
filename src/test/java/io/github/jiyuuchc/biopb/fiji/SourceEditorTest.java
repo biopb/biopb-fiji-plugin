@@ -154,7 +154,7 @@ public class SourceEditorTest {
 
     private boolean idle() throws Exception {
         boolean[] r = new boolean[1];
-        edt(() -> r[0] = !editor.isAdding() && !editor.isRemoving());
+        edt(() -> r[0] = !editor.isBusy());
         return r[0];
     }
 
@@ -177,21 +177,108 @@ public class SourceEditorTest {
         assertEquals(1, list.remove("dnd://x").getRemoved().size());
     }
 
-    @Test(expected = IllegalStateException.class)
-    public void listAddFailsWhenTheConnectionWasReplacedMeanwhile() throws Exception {
-        SourceList[] l = new SourceList[1];
+    @Test
+    public void listAddReturnsTheResultEvenIfTheConnectionWasReplacedMeanwhile() throws Exception {
         CatalogClient other = new Fake();
         CatalogClient[] now = {fake};
-        l[0] = new SourceList(() -> now[0]);
-        l[0].refresh();
+        SourceList l = new SourceList(() -> now[0]);
+        l.refresh();
         fake.duringAdd = () -> now[0] = other;
-        l[0].add("/data/x", false, null, null);
+        int listings = fake.listings.get();
+        assertEquals(2, l.add("/data/x", false, null, null).getAdded().size()); // the server did add them
+        assertEquals(listings, fake.listings.get()); // but no re-list into the other connection
+    }
+
+    private int rootQueries;
+
+    private SourceList countingList() throws Exception {
+        Fake f = new Fake() {
+            @Override public List<Map<String, Object>> query(String sql) {
+                if (sql.contains("regexp_extract")) {
+                    rootQueries++;
+                }
+                return super.query(sql);
+            }
+        };
+        SourceList l = new SourceList(f);
+        l.refresh();
+        return l;
+    }
+
+    @Test
+    public void droppedRootsAreReadOnceNotOnEveryRelist() throws Exception {
+        SourceList l = countingList();
+        assertEquals(1, rootQueries);
+        l.refresh();
+        l.refresh();
+        assertEquals(1, rootQueries);
+        l.add("/data/x", false, null, null); // an add changes what is dropped
+        assertEquals(2, rootQueries);
+        l.remove("dnd://x");
+        assertEquals(3, rootQueries);
+        l.clear(); // a new connection
+        l.refresh();
+        assertEquals(4, rootQueries);
+    }
+
+    @Test
+    public void aCatalogChangeTheWatcherSeesReadsTheRootsAgain() throws Exception {
+        Fake f = new Fake() {
+            @Override public List<Map<String, Object>> query(String sql) {
+                if (sql.contains("regexp_extract")) {
+                    rootQueries++;
+                }
+                return super.query(sql);
+            }
+
+            @Override public Map<String, Object> healthCheck() {
+                Map<String, Object> h = new LinkedHashMap<>();
+                h.put("source_count", (long) listings.get() > 3 ? 5L : 1L);
+                return h;
+            }
+        };
+        SourceList l = new SourceList(f);
+        l.refresh();
+        l.poll(); // the baseline
+        assertEquals(1, rootQueries);
+        f.listings.set(10); // the count moves
+        l.poll();
+        assertEquals(2, rootQueries);
+    }
+
+    @Test
+    public void theFullListingFallbackRecomputesTheRootsFromTheRows() throws Exception {
+        Fake old = new Fake() {
+            @Override public Level catalogChildren(String key, int limit) {
+                throw new UnsupportedOperationException("old server");
+            }
+
+            @Override public List<Map<String, Object>> query(String sql) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("source_id", "a");
+                row.put("source_url", "dnd://scans/a.zarr");
+                return new ArrayList<>(Arrays.asList(row));
+            }
+        };
+        SourceList l = new SourceList(old);
+        l.refresh();
+        assertEquals(Collections.singleton("dnd://scans"), l.getDroppedRoots());
+    }
+
+    @Test
+    public void searchResultsAddTheirRoots() throws Exception {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("source_id", "z");
+        row.put("source_url", "dnd://found/z");
+        list.addSources(Collections.singletonMap("z", row));
+        assertEquals(Collections.singleton("dnd://found"), list.getDroppedRoots());
     }
 
     @Test
     public void listReadsDroppedRoots() throws Exception {
         fake.droppedRows = Arrays.asList(Collections.<String, Object>singletonMap("root", "dnd://scans"),
                 Collections.<String, Object>singletonMap("root", ""));
+        list.clear(); // a new connection reads them
         list.refresh();
         assertEquals(Collections.singleton("dnd://scans"), list.getDroppedRoots());
         list.clear();
@@ -322,6 +409,7 @@ public class SourceEditorTest {
         }
         prompts.yes = false;
         edt(() -> editor.drop(dir.getPath()));
+        until(this::idleQuiet);
         assertEquals(Arrays.asList("Add large folder?"), prompts.asked);
         assertTrue(fake.registered.isEmpty());
         prompts.yes = true;
@@ -342,6 +430,7 @@ public class SourceEditorTest {
     public void aOneDriveFolderWarnsAndAddsAsCloudWhenConfirmed() throws Exception {
         prompts.yes = false;
         edt(() -> editor.drop("/home/me/OneDrive/scans"));
+        until(this::idleQuiet);
         assertEquals(Arrays.asList("Add source from a cloud folder?"), prompts.asked);
         assertTrue(fake.registered.isEmpty());
         prompts.yes = true;
@@ -360,8 +449,8 @@ public class SourceEditorTest {
         assertTrue(prompts.asked.isEmpty());
 
         edt(() -> editor.drop("/data/scans")); // again: asks about cloud mode
-        assertEquals(Arrays.asList("Add as cloud sources?"), prompts.asked);
         until(this::idleQuiet);
+        assertEquals(Arrays.asList("Add as cloud sources?"), prompts.asked);
         assertEquals(Arrays.asList(false, true), fake.cloudFlags);
         prompts.asked.clear();
         fake.addAnswer = new SourceChanges.AddResult(Arrays.asList("s1"), null, null, null, 0, 0);
@@ -394,6 +483,7 @@ public class SourceEditorTest {
         assertEquals(Arrays.asList(f.getPath()), fake.registered);
         editor.setChooser(() -> null);
         edt(() -> editor.addButtonForTest().doClick());
+        until(this::idleQuiet);
         assertEquals(1, fake.registered.size());
     }
 
@@ -411,6 +501,75 @@ public class SourceEditorTest {
         assertEquals(1, changes.get());
         assertEquals("Removed 1 source", statuses.get(statuses.size() - 1));
         assertEquals(Arrays.asList("Remove dropped source?", "Remove dropped source?"), prompts.asked);
+    }
+
+    @Test
+    public void removeIsRefusedWhileAnAddRunsAndTheOtherWayRound() throws Exception {
+        fake.release = new CountDownLatch(1);
+        edt(() -> editor.drop("/data/x"));
+        assertTrue(fake.started.await(5, TimeUnit.SECONDS));
+        edt(() -> editor.remove("dnd://scans", "scans"));
+        assertTrue(fake.deregistered.isEmpty());
+        assertTrue(prompts.asked.isEmpty()); // not even asked
+        assertEquals("Cannot remove now: " + DropPolicy.ADDING, statuses.get(statuses.size() - 1));
+        fake.release.countDown();
+        until(this::idleQuiet);
+
+        // a removal running holds off an add
+        CountDownLatch gate = new CountDownLatch(1);
+        Fake slow = new Fake() {
+            @Override public SourceChanges.RemoveResult deregisterLocalPath(String r) throws IOException {
+                try { gate.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) { throw new IOException(e); }
+                return removeAnswer;
+            }
+        };
+        current = new SourceList(slow);
+        current.refresh();
+        edt(() -> editor.remove("dnd://scans", "scans"));
+        edt(() -> {
+            assertEquals(SourceEditor.REMOVING, editor.hintText());
+            assertFalse(editor.addButtonForTest().isEnabled());
+            editor.drop("/data/y");
+        });
+        assertTrue(slow.registered.isEmpty());
+        gate.countDown();
+        until(this::idleQuiet);
+        edt(() -> assertEquals(DropPolicy.READY, editor.hintText()));
+    }
+
+    @Test
+    public void removeIsRefusedAgainstARemoteServer() throws Exception {
+        url = "grpc://example.com:8815";
+        edt(() -> editor.remove("dnd://scans", "scans"));
+        assertTrue(fake.deregistered.isEmpty());
+        assertEquals("Cannot remove now: " + DropPolicy.REMOTE, statuses.get(statuses.size() - 1));
+    }
+
+    @Test
+    public void aClipboardPasteIsNotAnAdd() throws Exception {
+        javax.swing.JTree tree = new javax.swing.JTree();
+        edt(() -> editor.acceptDropsOn(tree));
+        java.awt.datatransfer.Transferable files = new java.awt.datatransfer.Transferable() {
+            @Override public java.awt.datatransfer.DataFlavor[] getTransferDataFlavors() {
+                return new java.awt.datatransfer.DataFlavor[] {java.awt.datatransfer.DataFlavor.javaFileListFlavor};
+            }
+
+            @Override public boolean isDataFlavorSupported(java.awt.datatransfer.DataFlavor f) {
+                return f.equals(java.awt.datatransfer.DataFlavor.javaFileListFlavor);
+            }
+
+            @Override public Object getTransferData(java.awt.datatransfer.DataFlavor f) {
+                return Arrays.asList(new File("/data/x"));
+            }
+        };
+        javax.swing.TransferHandler.TransferSupport paste = new javax.swing.TransferHandler.TransferSupport(tree, files);
+        assertFalse(paste.isDrop());
+        edt(() -> {
+            assertFalse(tree.getTransferHandler().canImport(paste));
+            assertFalse(tree.getTransferHandler().importData(paste));
+        });
+        edt(() -> { });
+        assertTrue(fake.registered.isEmpty());
     }
 
     @Test

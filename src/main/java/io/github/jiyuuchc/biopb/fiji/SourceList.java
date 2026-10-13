@@ -78,6 +78,7 @@ public final class SourceList implements AutoCloseable {
     private volatile Map<String, CatalogClient.Level> levels = Collections.emptyMap();
     private volatile boolean lazy;
     private volatile Set<String> droppedRoots = Collections.emptySet();
+    private volatile boolean rootsStale = true; // the dropped roots are read again at the next lazy re-list
     private boolean lazyUnsupported;
 
     private volatile Supplier<? extends Collection<String>> openKeys = Collections::emptySet;
@@ -164,6 +165,7 @@ public final class SourceList implements AutoCloseable {
             levels = Collections.emptyMap();
             lazy = false;
             droppedRoots = Collections.emptySet();
+            rootsStale = true;
             lazyUnsupported = false;
             lastCount = null;
             lastGeneration = null;
@@ -191,7 +193,9 @@ public final class SourceList implements AutoCloseable {
             before = levels;
         }
         if (tryLevels && refreshLevels(client, startEpoch, before)) {
-            refreshDroppedRoots(client, startEpoch);
+            if (rootsStale) {
+                refreshDroppedRoots(client, startEpoch);
+            }
             return sources;
         }
         Map<String, Map<String, Object>> listed = indexById(client.query(sourcesSql(sourceColumns(client))));
@@ -201,14 +205,16 @@ public final class SourceList implements AutoCloseable {
             lazy = false;
             levels = Collections.emptyMap();
             sources = listed;
+            droppedRoots = Collections.unmodifiableSet(DroppedSources.rootsOf(listed.values())); // all rows are held
         }
         return listed;
     }
 
     /**
      * Reads which top-level names were made by drag-and-drop ({@code dnd://name} roots), as the napari
-     * widget does. A server that will not say leaves the last answer: the tree then has no remove action
-     * on a folder (a source row is recognised by its own URL).
+     * widget does. Asked only when stale (a new connection, a change the watcher saw, an add or a
+     * removal), not on every re-list. A server that will not say leaves the last answer (and stays
+     * stale, so it is asked again): the tree then has no remove action on a folder.
      */
     private void refreshDroppedRoots(CatalogClient client, int startEpoch) {
         try {
@@ -222,6 +228,7 @@ public final class SourceList implements AutoCloseable {
             synchronized (lock) {
                 if (startEpoch == epoch && now == client) {
                     droppedRoots = Collections.unmodifiableSet(roots);
+                    rootsStale = false;
                 }
             }
         } catch (IOException | RuntimeException e) {
@@ -370,6 +377,11 @@ public final class SourceList implements AutoCloseable {
             Map<String, Map<String, Object>> all = new HashMap<>(sources);
             all.putAll(found);
             sources = Collections.unmodifiableMap(all);
+            Set<String> roots = DroppedSources.rootsOf(found.values());
+            if (!droppedRoots.containsAll(roots)) { // a search finds sources the levels have not listed
+                roots.addAll(droppedRoots);
+                droppedRoots = Collections.unmodifiableSet(roots);
+            }
         }
     }
 
@@ -448,7 +460,7 @@ public final class SourceList implements AutoCloseable {
      *
      * @param onProgress receives progress on the calling thread, or {@code null}
      * @param shouldCancel polled as progress arrives; true stops the walk, or {@code null}
-     * @throws IllegalStateException if not connected, or the connection changed meanwhile
+     * @throws IllegalStateException if not connected (a connection replaced meanwhile still returns the result)
      * @throws IOException if the call fails
      */
     public SourceChanges.AddResult add(String path, boolean cloud, Consumer<SourceChanges.AddProgress> onProgress,
@@ -463,7 +475,7 @@ public final class SourceList implements AutoCloseable {
     /**
      * Unregisters the sources under a {@code dnd://} root and re-lists.
      *
-     * @throws IllegalStateException if not connected, or the connection changed meanwhile
+     * @throws IllegalStateException if not connected (a connection replaced meanwhile still returns the result)
      * @throws IOException if the call fails
      */
     public SourceChanges.RemoveResult remove(String rootUrl) throws IOException {
@@ -474,9 +486,18 @@ public final class SourceList implements AutoCloseable {
         return result;
     }
 
+    /**
+     * Re-lists after the server call went through. The call happened, so its result is the caller's
+     * either way; only the re-list is skipped (a replaced connection must not be listed into).
+     */
     private void afterChange(CatalogClient client, int startEpoch, String what) {
-        synchronized (lock) { // a replaced connection must not be re-listed into
-            checkCurrent(client, startEpoch, connection.get());
+        rootsStale = true;
+        synchronized (lock) {
+            try {
+                checkCurrent(client, startEpoch, connection.get());
+            } catch (IllegalStateException replaced) {
+                return;
+            }
         }
         try {
             refresh();
@@ -618,6 +639,9 @@ public final class SourceList implements AutoCloseable {
             }
             changed = !sameNumber(count, lastCount) || pending != lastPending
                     || !sameValue(generation, lastGeneration);
+        }
+        if (changed) {
+            rootsStale = true; // another client may have added or removed a drop
         }
         if (changed && relist(startEpoch)) {
             synchronized (lock) {

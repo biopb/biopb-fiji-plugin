@@ -959,9 +959,7 @@ public class TensorBrowserPanel extends JPanel {
             return null;
         }
         if (n.getKind() == TreeModelBuilder.Kind.FOLDER) {
-            Set<String> roots = new HashSet<>(l.getDroppedRoots());
-            roots.addAll(DroppedSources.rootsOf(l.getSources().values()));
-            return DroppedSources.removeRootForFolder(n.getKey(), roots);
+            return DroppedSources.removeRootForFolder(n.getKey(), l.getDroppedRoots());
         }
         if (n.getKind() == TreeModelBuilder.Kind.SOURCE) {
             Map<String, Object> d = l.getSources().get(n.getKey());
