@@ -158,8 +158,8 @@ public final class TensorOpener {
             src = label.gridded(src);
         }
 
-        String name = label != null ? label.name : arrayId;
-        String title = level == 0 ? name : name + " [level " + level + "]";
+        String title = label != null ? LabelOpener.title(arrayId, level)
+                : level == 0 ? arrayId : arrayId + " [level " + level + "]";
         ImagePlus imp = assemble(src, title);
         if (label != null) {
             label.calibrate(imp.getCalibration(), d, hint);

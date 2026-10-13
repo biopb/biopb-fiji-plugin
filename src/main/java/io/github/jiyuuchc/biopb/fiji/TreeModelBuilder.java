@@ -229,35 +229,35 @@ public final class TreeModelBuilder {
                     Collections.<String>emptyList(), state);
         }
         // Label sets ride under their image rather than counting as tensors of the source.
-        List<LabelId.Group> groups = LabelId.group(tensors);
-        if (groups.size() == 1) {
-            Map<?, ?> t = groups.get(0).image;
-            String array = String.valueOf(t.get("array_id"));
-            DefaultMutableTreeNode n = node(Kind.SOURCE, id, name, withGlyph(glyph, tensorSuffix(t)), tip,
-                    Collections.singletonList(array), state);
-            addLabelRows(n, groups.get(0), id);
-            return n;
-        }
+        LabelId.Grouping grouping = LabelId.group(tensors);
+        List<LabelId.Group> groups = grouping.images;
         List<String> all = new ArrayList<>(); // the images only: "open all" never lays a mask implicitly
         for (LabelId.Group g : groups) {
             all.add(String.valueOf(g.image.get("array_id")));
         }
-        DefaultMutableTreeNode n = node(Kind.SOURCE, id, name, withGlyph(glyph, groups.size() + " tensors"), tip, all,
-                state);
-        for (LabelId.Group g : groups) {
-            String array = String.valueOf(g.image.get("array_id"));
-            DefaultMutableTreeNode row = node(Kind.TENSOR, array, shortName(array), tensorSuffix(g.image), array,
-                    Collections.singletonList(array));
-            nodeOf(row).sourceId = id;
-            addLabelRows(row, g, id);
-            n.add(row);
+        DefaultMutableTreeNode n;
+        if (groups.size() == 1) {
+            n = node(Kind.SOURCE, id, name, withGlyph(glyph, tensorSuffix(groups.get(0).image)), tip, all, state);
+            addLabelRows(n, groups.get(0).labelSets, id);
+        } else {
+            String count = groups.isEmpty() ? "" : groups.size() + " tensors";
+            n = node(Kind.SOURCE, id, name, withGlyph(glyph, count), tip, all, state);
+            for (LabelId.Group g : groups) {
+                String array = String.valueOf(g.image.get("array_id"));
+                DefaultMutableTreeNode row = node(Kind.TENSOR, array, shortName(array), tensorSuffix(g.image), array,
+                        Collections.singletonList(array));
+                nodeOf(row).sourceId = id;
+                addLabelRows(row, g.labelSets, id);
+                n.add(row);
+            }
         }
+        addLabelRows(n, grouping.orphans, id); // not under any image, and not counted above
         return n;
     }
 
-    /** One row per label set of {@code g}, under {@code parent}. */
-    private static void addLabelRows(DefaultMutableTreeNode parent, LabelId.Group g, String sourceId) {
-        for (Map<?, ?> t : g.labelSets) {
+    /** One LABEL row per set, under {@code parent}. */
+    private static void addLabelRows(DefaultMutableTreeNode parent, List<Map<?, ?>> sets, String sourceId) {
+        for (Map<?, ?> t : sets) {
             String array = String.valueOf(t.get("array_id"));
             LabelId.Address a = LabelId.parse(array);
             // The set's own name, not the last segment: a native pyramid level would otherwise be what the row reads.

@@ -48,27 +48,65 @@ final class LabelOpener {
 
         /**
          * Fills {@code cal} from the image when aligned (the set is on the image's grid), else from
-         * the set's own descriptor. {@code hint} is the set's level scale hint, in the set's axes.
+         * the set's own descriptor. {@code hint} is the set's level scale hint, in the set's axes; a
+         * set that is a native level of a pyramid is also scaled by the image level it matched. A
+         * hint that does not fit the axes falls back to the set's own calibration rather than failing
+         * (and to none if that does not fit either).
          */
         void calibrate(Calibration cal, TensorDescriptor label, long[] hint) {
-            if (!alignment.aligned) {
+            long[] full = alignment.aligned ? imageHint(hint) : null;
+            if (full != null) {
+                TensorOpener.applyCalibration(cal, alignment.imageMap, image.getPhysicalScaleList(),
+                        image.getPhysicalUnitList(), full);
+            } else if (hint.length == alignment.labelMap.ndim) {
                 TensorOpener.applyCalibration(cal, alignment.labelMap, label.getPhysicalScaleList(),
                         label.getPhysicalUnitList(), hint);
-                return;
             }
+        }
+
+        /** The set's hint on the image's axes (1 on a samples axis), or null if the sizes do not fit. */
+        private long[] imageHint(long[] hint) {
             AxisMap im = alignment.imageMap;
-            long[] full = new long[im.ndim]; // the image's axes: 1 where the set has no samples axis
+            if (hint.length != alignment.labelMap.ndim || hint.length != im.ndim - (im.s >= 0 ? 1 : 0)) {
+                return null;
+            }
+            long[] level = null;
+            if (alignment.imageLevel > 0) {
+                if (alignment.imageLevel >= image.getPyramidCount()) {
+                    return null;
+                }
+                List<Long> h = image.getPyramid(alignment.imageLevel).getScaleHintList();
+                if (h.size() != im.ndim) {
+                    return null;
+                }
+                level = TensorOpener.toArray(h);
+            }
+            long[] full = new long[im.ndim]; // 1 where the set has no samples axis
             for (int i = 0, j = 0; i < full.length; i++) {
                 full[i] = i == im.s ? 1 : hint[j++];
+                if (level != null) {
+                    full[i] *= level[i];
+                }
             }
-            TensorOpener.applyCalibration(cal, im, image.getPhysicalScaleList(), image.getPhysicalUnitList(), full);
+            return full;
         }
+    }
+
+    /**
+     * The title of an opened set: its name and its image's short name (two images can each have a set
+     * of the same name), then the pyramid level when it is not 0.
+     */
+    static String title(String arrayId, int level) {
+        LabelId.Address a = LabelId.parse(arrayId);
+        String t = a == null ? arrayId : a.name + " (" + TreeModelBuilder.shortName(a.imageArrayId) + ")";
+        return level == 0 ? t : t + " [level " + level + "]";
     }
 
     /**
      * Decides how {@code d} (the set's descriptor) lines up with its image. An image that cannot be
      * described, or a set that does not line up, is not a failure: the set opens with its own axes
-     * and a note is logged, as the napari widget does. Blocking (one descriptor read).
+     * and a note is logged, as the napari widget does. Blocking (one descriptor read): {@link TensorOpener#open}
+     * already requires a worker thread, and the controller calls it from a SwingWorker.
      *
      * @throws AxisMappingException if the set is unaligned and has no usable axes of its own
      */
@@ -81,9 +119,16 @@ final class LabelOpener {
         } catch (RuntimeException e) {
             LOG.warning("Label set " + arrayId + ": image " + a.imageArrayId + " could not be described");
         }
-        LabelAlignment al = LabelAlignment.decide(image == null ? null : image.getDimLabelsList(),
-                image == null ? null : toArray(image.getShapeList()), d.getDimLabelsList(),
-                toArray(d.getShapeList()), axisOverride);
+        List<long[]> shapes = null;
+        if (image != null) {
+            shapes = new ArrayList<>();
+            shapes.add(toArray(image.getShapeList()));
+            for (int k = 1; k < image.getPyramidCount(); k++) {
+                shapes.add(toArray(image.getPyramid(k).getShapeList()));
+            }
+        }
+        LabelAlignment al = LabelAlignment.decideLevels(image == null ? null : image.getDimLabelsList(), shapes,
+                d.getDimLabelsList(), toArray(d.getShapeList()), axisOverride);
         if (!al.aligned) {
             note.accept(al.note);
         }

@@ -312,6 +312,10 @@ public class TensorBrowserController implements TensorBrowserListener {
 
     @Override
     public void roisRequested(String arrayId) {
+        if (LabelId.isLabel(arrayId)) { // ROIs belong to the image, never to one of its label sets
+            ui.error("Load ROIs", "'" + arrayId + "' is a label set; load ROIs for its image instead.");
+            return;
+        }
         RefCountedConnection current = connection.get();
         if (current == null) {
             ui.error("Load ROIs", "Not connected to a server.");

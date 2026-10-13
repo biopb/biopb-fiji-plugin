@@ -896,6 +896,10 @@ public class TensorBrowserPanel extends JPanel {
     }
 
     private void fireRois(String arrayId) {
+        if (LabelId.isLabel(arrayId)) {
+            say("ROIs belong to the image, not to a label set");
+            return;
+        }
         for (TensorBrowserListener l : listeners) {
             l.roisRequested(arrayId);
         }

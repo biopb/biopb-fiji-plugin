@@ -38,13 +38,21 @@ final class BroadcastPlaneSource implements PlaneSource {
     @Override
     public Object readPlane(int ti, int ci, int zi) {
         int[] key = {inner.getSizeT() == 1 ? 0 : ti, inner.getSizeC() == 1 ? 0 : ci, inner.getSizeZ() == 1 ? 0 : zi};
-        synchronized (this) {
-            if (lastKey == null || !java.util.Arrays.equals(lastKey, key)) {
-                lastPlane = inner.readPlane(key[0], key[1], key[2]);
-                lastKey = key;
-            }
-            return clone(lastPlane);
+        if (key[0] == ti && key[1] == ci && key[2] == zi) {
+            return inner.readPlane(ti, ci, zi); // nothing repeated: pass through, no copy
         }
+        synchronized (this) { // a short lock: the remote read below is not under it
+            if (lastKey != null && java.util.Arrays.equals(lastKey, key)) {
+                return clone(lastPlane);
+            }
+        }
+        Object plane = inner.readPlane(key[0], key[1], key[2]);
+        Object mine = clone(plane); // one copy to keep, the original goes to the caller
+        synchronized (this) {
+            lastKey = key;
+            lastPlane = mine;
+        }
+        return plane;
     }
 
     private static Object clone(Object plane) { // the caller owns what it gets

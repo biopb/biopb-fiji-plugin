@@ -2,6 +2,7 @@ package io.github.jiyuuchc.biopb.fiji;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,39 +74,43 @@ public final class LabelId {
         Group(Map<?, ?> image) { this.image = image; }
     }
 
+    /** A source's tensors, grouped. */
+    public static final class Grouping {
+        /** The image tensors, in the order listed. */
+        public final List<Group> images = new ArrayList<>();
+        /** Sets whose image the source does not list: shown, but never counted as tensors or opened with "all". */
+        public final List<Map<?, ?>> orphans = new ArrayList<>();
+    }
+
     /**
-     * A source's tensors with each label set filed under the image it annotates, images in the order
-     * listed. A set whose image the source does not list keeps a group of its own (its entry is the
-     * "image") rather than vanishing. Mirror of the napari widget's {@code _group_tensors}.
+     * A source's tensors with each label set filed under the image it annotates. A set whose image the
+     * source does not list is an orphan: it keeps a row (a tensor the catalog lists and the tree hides
+     * is the worse failure) but is not an image. Mirrors the napari widget's {@code _group_tensors},
+     * except that napari promotes an orphan to a group of its own, which makes it count as a tensor.
      */
-    public static List<Group> group(List<Map<?, ?>> tensors) {
-        Map<String, Group> groups = new LinkedHashMap<>();
+    public static Grouping group(List<Map<?, ?>> tensors) {
+        Grouping out = new Grouping();
+        Map<String, Group> byId = new LinkedHashMap<>();
         List<Map<?, ?>> sets = new ArrayList<>();
-        List<String> setImages = new ArrayList<>();
         for (Map<?, ?> t : tensors) {
             String id = String.valueOf(t.get("array_id"));
-            Address a = parse(id);
-            if (a != null) {
+            if (parse(id) != null) {
                 sets.add(t);
-                setImages.add(a.imageArrayId);
-            } else if (!groups.containsKey(id)) {
-                groups.put(id, new Group(t));
+            } else if (!byId.containsKey(id)) {
+                Group g = new Group(t);
+                byId.put(id, g);
+                out.images.add(g);
             }
         }
-        for (int i = 0; i < sets.size(); i++) {
-            Group g = groups.get(setImages.get(i));
-            if (g != null) {
-                g.labelSets.add(sets.get(i));
-            } else {
-                String id = String.valueOf(sets.get(i).get("array_id"));
-                if (!groups.containsKey(id)) {
-                    groups.put(id, new Group(sets.get(i)));
-                }
-            }
+        for (Map<?, ?> t : sets) {
+            Group g = byId.get(parse(String.valueOf(t.get("array_id"))).imageArrayId);
+            (g != null ? g.labelSets : out.orphans).add(t);
         }
-        for (Group g : groups.values()) {
-            Collections.sort(g.labelSets, (a, b) -> String.valueOf(a.get("array_id")).compareTo(String.valueOf(b.get("array_id"))));
+        Comparator<Map<?, ?>> byArrayId = (a, b) -> String.valueOf(a.get("array_id")).compareTo(String.valueOf(b.get("array_id")));
+        for (Group g : out.images) {
+            Collections.sort(g.labelSets, byArrayId);
         }
-        return new ArrayList<>(groups.values());
+        Collections.sort(out.orphans, byArrayId);
+        return out;
     }
 }
