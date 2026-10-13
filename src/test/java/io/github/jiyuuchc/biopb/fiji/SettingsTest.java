@@ -217,11 +217,37 @@ public class SettingsTest {
     }
 
     @Test
-    public void saveOverUnreadableFileReplacesIt() throws IOException {
-        write("{not json");
+    public void saveOverMalformedFileKeepsABackup() throws IOException {
+        for (String bad : new String[] {"{not json", "[1, 2]"}) {
+            write(bad);
+            Settings s = new Settings(file);
+            s.set("grpc.max_message_size_mb", 64L);
+            assertEquals(64, read().getAsJsonObject("grpc").get("max_message_size_mb").getAsLong());
+            Path bak = file.resolveSibling(Settings.FILE_NAME + ".bak");
+            assertEquals(bad, new String(Files.readAllBytes(bak), StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    public void saveKeepsForeignNullsAndUnescapedStrings() throws IOException {
+        write("{\"napari_only\": {\"n\": null, \"s\": \"a<b>&'=\"}}");
+        new Settings(file).set("widget.is_3d", true);
+        String text = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        assertTrue(text, text.contains("\"n\": null"));
+        assertTrue(text, text.contains("a<b>&'="));
+    }
+
+    @Test
+    public void aReadErrorKeepsTheLastGoodValuesAndRetries() throws IOException {
+        write("{\"memory\": {\"warn_threshold_mb\": 100}}");
         Settings s = new Settings(file);
-        s.set("grpc.max_message_size_mb", 64L);
-        assertEquals(64, read().getAsJsonObject("grpc").get("max_message_size_mb").getAsLong());
+        assertEquals(100, s.getLong("memory.warn_threshold_mb"));
+        Files.delete(file);
+        Files.createDirectories(file); // now unreadable (a directory): an I/O error, not "absent"
+        assertEquals(100, s.getLong("memory.warn_threshold_mb")); // last good, not the default
+        Files.delete(file);
+        write("{\"memory\": {\"warn_threshold_mb\": 200}}");
+        assertEquals(200, s.getLong("memory.warn_threshold_mb")); // retried
     }
 
     @Test

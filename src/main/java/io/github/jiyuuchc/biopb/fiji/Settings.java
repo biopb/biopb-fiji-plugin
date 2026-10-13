@@ -240,7 +240,10 @@ public final class Settings {
         }
     }
 
-    /** Drops what was read, so the next get re-reads the file. Unsaved sets are lost. */
+    /**
+     * Drops what was read, so the next get re-reads the file. This also discards any pending unsaved
+     * sets (those made with {@code persist == false} and not yet {@link #save() saved}).
+     */
     public void reload() {
         synchronized (lock) {
             values = null;
@@ -271,6 +274,15 @@ public final class Settings {
                     LOG.log(Level.WARNING, "Not saving: could not read " + target, read.failed);
                     return;
                 }
+                if (read.root == null && Files.exists(target)) { // malformed: keep a copy before replacing it
+                    Path bak = target.resolveSibling(target.getFileName() + ".bak");
+                    try {
+                        Files.copy(target, bak, StandardCopyOption.REPLACE_EXISTING);
+                        LOG.warning("Replacing malformed " + target + "; the old content is in " + bak);
+                    } catch (IOException e) {
+                        LOG.log(Level.WARNING, "Replacing malformed " + target + "; could not back it up", e);
+                    }
+                }
                 JsonObject root = read.root != null ? read.root : new JsonObject();
                 for (Map.Entry<String, Object> e : dirty.entrySet()) {
                     String path = e.getKey();
@@ -296,7 +308,7 @@ public final class Settings {
                         // not a POSIX file system
                     }
                 }
-                Files.write(tmp, new GsonBuilder().setPrettyPrinting().create().toJson(root).getBytes(StandardCharsets.UTF_8));
+                Files.write(tmp, new GsonBuilder().setPrettyPrinting().serializeNulls().disableHtmlEscaping().create().toJson(root).getBytes(StandardCharsets.UTF_8));
                 try {
                     Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
                 } catch (AtomicMoveNotSupportedException e) {
@@ -393,7 +405,16 @@ public final class Settings {
             if (file != null) {
                 Tree t = readTree(file);
                 if (t.failed != null) {
+                    // Keep serving the last good values and do not record the stamp, so the next get retries.
                     LOG.log(Level.WARNING, "Ignoring unreadable " + file, t.failed);
+                    if (values != null) {
+                        return values;
+                    }
+                    Map<String, Object> d = new LinkedHashMap<>(DEFAULTS);
+                    d.putAll(dirty);
+                    values = d;
+                    stamp = null; // never equals a real stamp: retried at the next get
+                    return values;
                 }
                 if (t.root != null) {
                     for (Map.Entry<String, Object> d : DEFAULTS.entrySet()) {
