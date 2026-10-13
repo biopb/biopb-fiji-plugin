@@ -130,4 +130,16 @@ public interface CatalogClient {
             BooleanSupplier shouldCancel) throws IOException {
         throw new UnsupportedOperationException("resolve is not supported by this client");
     }
+
+    /**
+     * A source's free-form metadata (what the format carries beyond the tensors). Blocking: call off
+     * the UI thread.
+     *
+     * @return the metadata, nested maps and lists of plain values; possibly empty
+     * @throws UnsupportedOperationException if this client cannot read it
+     * @throws IOException if the call fails
+     */
+    default Map<String, Object> getSourceMetadata(String sourceId) throws IOException {
+        throw new UnsupportedOperationException("source metadata is not supported by this client");
+    }
 }
